@@ -13,11 +13,12 @@
 
 ## 下载
 
-**[⬇ MarisaKiki.apk（429 MB）](https://github.com/fyb114514/kiki/releases/download/v1.0/MarisaKiki.apk)**
+**[⬇ kiki-v1.0.apk（429 MB）](https://github.com/fyb114514/kiki/releases/download/v1.0/kiki-v1.0.apk)**
 
 ```
-SHA256: 1539CD0739AF4E9D0D585340CA68E4275AC2647B10E96AF41B70B50FEA93483B
-大小:   429.1 MB (449,940,118 字节)
+SHA256: C9A619014D1E8D83042000A5D5C57FCD8E9FACCAFD2EEBBCA750262DCEFFC228
+大小:   429.1 MB (449,940,114 字节)
+包名:   com.kiki.android
 ```
 
 ### 安装要求
@@ -76,7 +77,7 @@ Android 有官方预编译的 `onnxruntime-android`（`libonnxruntime.so` + Java
 ### 手写 Qwen 分词器的踩坑记录
 
 ONNX Runtime 只提供算子，**不带分词**。所以字节级 BPE 是**纯 Java 手写**的
-（[QwenTokenizer.java](android-app/src-native/com/marisa/kiki/QwenTokenizer.java)）。
+（[QwenTokenizer.java](android-app/src-native/com/kiki/android/QwenTokenizer.java)）。
 
 最容易错的是**预分词正则**。第一版误用了 Python 的 `\w`（它**包含汉字**），
 导致中文被整段当成一个词，与官方不符（13 个测试用例只对 3 个）。
@@ -112,7 +113,7 @@ Fatal signal 11 (SIGSEGV) in libonnxruntime.so
 ```
 
 正确做法：**持有 `Result` 直到下一步推理完成**，再 close 它。
-见 [LlmEngine.java](android-app/src-native/com/marisa/kiki/LlmEngine.java)。
+见 [LlmEngine.java](android-app/src-native/com/kiki/android/LlmEngine.java)。
 
 ### asset 路径的反斜杠
 
@@ -146,7 +147,7 @@ powershell -ExecutionPolicy Bypass -File android-app\build_apk.ps1
 > 不能放 `--classpath`，否则运行时报 `NoClassDefFoundError`。
 
 > 注：构建需要 `assets/llm/model.onnx`（460MB）等大文件。
-> 它们因体积原因**未纳入版本控制**，详见 [android-app/README.md](android-app/README.md)。
+> 它们因体积原因**未纳入版本控制**，详见文末的「技术踩坑记录」。
 
 ---
 
@@ -154,14 +155,14 @@ powershell -ExecutionPolicy Bypass -File android-app\build_apk.ps1
 
 ```
 android-app/
-  src-native/com/marisa/kiki/      Java 源码（构建时直接编译，无 Gradle）
+  src-native/com/kiki/android/      Java 源码（构建时直接编译，无 Gradle）
     MainActivity.java              界面（全宽条纹消息行 + 底部说话区）
     LlmEngine.java                 ONNX 推理 + KV 缓存生成循环
     LlmBootstrap.java              模型释放与载入
     QwenTokenizer.java             手写 Qwen 字节级 BPE
     ChatBrain.java                 回答链路编排
     Brain.java                     规则推理引擎（因果/属性/分类继承）
-    MarisaBot.java                 检索层
+    KikiBot.java                   检索层
     OfflineRecognizer.java         Vosk 语音识别
     SpeechManager.java             TTS
     ModelInstaller.java            语音模型释放
