@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.marisa.kiki"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <!-- 录音:用于语音输入 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 语音识别服务可能需要网络(iQOO/小米等机型可离线) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <queries>
+        <!-- Android 11+ 需要声明才能查询 TTS / 识别服务 -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MarisaKiki">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

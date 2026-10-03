@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  还原 2011 原版布局:
+    - 上方:一整条消息列表(整行满宽、半透明蓝白交替条纹)
+    - 下方:一块深灰色区域,长按说话(原版是纯语音,没有打字输入)
+
+  背景图**直接显示、不做任何改色**:没有暗化遮罩,消息行用半透明条纹,
+  所以背景从每条消息里透出来。文字可读性靠 TextView 的阴影,不靠不透明底色。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#102030"
+    android:fitsSystemWindows="true">
+
+    <!-- 1. 背景图(直接显示,上层不再压暗化遮罩) -->
+    <ImageView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:src="@drawable/bg_kiki"
+        android:contentDescription="@null" />
+
+    <!-- 2. 前景:消息条 + 说话区 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <ScrollView
+            android:id="@+id/scroll"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:fillViewport="true"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/messages"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </ScrollView>
+
+        <!-- 说话区:原版下半部分那块区域,长按录音。 -->
+        <FrameLayout
+            android:id="@+id/talkArea"
+            android:layout_width="match_parent"
+            android:layout_height="96dp"
+            android:background="#3C3C3C">
+
+            <TextView
+                android:id="@+id/talkHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:gravity="center"
+                android:lineSpacingExtra="4dp"
+                android:text=""
+                android:textColor="#E8E8E8"
+                android:textSize="16sp" />
+        </FrameLayout>
+    </LinearLayout>
+</FrameLayout>

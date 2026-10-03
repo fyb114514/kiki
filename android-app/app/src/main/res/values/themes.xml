@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        零依赖:父主题用系统自带的,不引用 MaterialComponents/AppCompat,
+        因为本工程走"手工构建 + 纯框架 API"路线(见 build_apk.ps1 的说明)。
+
+        这里用 NoActionBar 去掉标题栏(原来那条"白边"的一半),
+        并把状态栏压成深色和背景融合(另一半"白边")。
+    -->
+    <style name="Theme.MarisaKiki" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">#102030</item>
+
+        <!-- 状态栏:深色,和背景融为一体,不再是一条白边 -->
+        <item name="android:statusBarColor">#0A1622</item>
+
+        <!-- 导航栏也压深,底部不再突兀 -->
+        <item name="android:navigationBarColor">#0A1622</item>
+
+        <!-- 亮色图标:因为状态栏/导航栏底是深色 -->
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

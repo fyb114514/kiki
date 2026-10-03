@@ -1,0 +1,67 @@
+# --- 通用 ---
+.DS_Store
+Thumbs.db
+*.log
+
+# --- 虚拟环境(根目录与水印目录都要忽略) ---
+.venv/
+venv/
+env/
+
+# --- 后端:Python (server-py/) ---
+server-py/.venv/
+server-py/__pycache__/
+server-py/.env
+server-py/*.db
+
+# --- 后端:Go (server/) 二进制 ---
+server/server.exe
+server/*.exe
+
+# --- 前端 (client/) ---
+client/node_modules/
+client/dist/
+client/.env.local
+client/.env.*.local
+
+# --- 测试/临时 ---
+__pycache__/
+*.pyc
+*.pyo
+*.cache
+pip-unpack-*/
+*.tar.gz
+*.whl
+*.zip
+!android-app/app/src/main/assets/model-cn.zip
+
+# 生成的缓存/索引(可重新生成,体积大)
+server-py/lexicon_cache.py
+server-py/*.cache
+server-py/.mypy_cache/
+server-py/.pytest_cache/
+.pytest_cache/
+.mypy_cache/
+
+# --- Android kiki (android-app/) ---
+# 构建产物与模型不能进 git:
+#   APK 429 MB,远超 GitHub 单文件 100 MB 上限 → 必须走 Releases 附件上传
+android-app/build/
+android-app/.gradle/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# 内置模型(数 GB,且属第三方):不进仓库,由构建脚本从 assets 获取
+# 若确实需要版本化,请用 Git LFS 并自行确认模型许可
+android-app/app/src/main/assets/llm/model.onnx
+android-app/app/src/main/assets/model-cn.zip
+android-app/app/src/main/assets/*.onnx
+
+# --- 密钥/凭据 ---
+*.keystore
+*.jks
+.env
+.env.local

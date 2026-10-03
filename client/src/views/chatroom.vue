@@ -1,0 +1,554 @@
+<template>
+  <div class="chatroom">
+    <div class="container">
+      <!-- 左侧:对话区 -->
+      <div class="talk-panel">
+        <span>うるさい! うるさい.. うるさい...</span>
+        <div ref="talkPlace" class="talk-place">
+          <div
+            v-for="(item, index) in talkList"
+            :key="index"
+            class="talk_entry"
+            :class="{ you_color: item.name === 'You' }"
+          >
+            <span class="talk_item" :class="{ you_color: item.name === 'You' }">{{ item.name }}</span>&nbsp;:&nbsp;
+            <span class="talk_item" :class="{ you_color: item.name === 'You' }" v-text="item.content"></span>
+          </div>
+        </div>
+        <div class="speak">
+          <input ref="youInput" v-model="inputText" @keydown.enter="sendMessage" type="text" name="you" />
+          <input @click="sendMessage" type="submit" value="发送" />
+        </div>
+      </div>
+      <!-- 右侧:角色立绘 + 系统指令说明 -->
+      <div class="profile">
+        <div class="avatar"></div>
+        <div class="cmd">
+          <span class="system-cmd">系统级指令快速说明——</span>
+          <span class="system-cmd cmd-collect">
+            <span class="marisa-cmd">teach</span>&nbsp;教学(teach word/sentence/syntax/logic/greeting 分类,auto 自动)
+          </span>
+          <span class="system-cmd cmd-collect">
+            <span class="marisa-cmd">forget</span>&nbsp;忘记最后所说的内容
+          </span>
+          <span class="system-cmd cmd-collect">
+            <span class="marisa-cmd">status</span>&nbsp;查看目前知识所掌握情况
+          </span>
+          <span class="system-cmd cmd-collect">
+            <span class="marisa-cmd">miss</span>&nbsp;查看待学习清单
+          </span>
+          <span class="system-cmd cmd-collect">
+            试试：<span class="marisa-cmd">现在几点</span> / <span class="marisa-cmd">1+2</span>（资讯小工具）
+          </span>
+          <span class="system-cmd cmd-collect">
+            教学可三段：<span class="marisa-cmd">关键词`回答`@user:xxx</span> 只对那人回 / <span class="marisa-cmd">@time:night</span> 只在晚上回
+          </span>
+          <span class="system-cmd cmd-collect">
+            <span class="marisa-cmd">logic</span> 分类回答里可用 <span class="marisa-cmd">{1+2}</span> / <span class="marisa-cmd">{now}</span>
+          </span>
+          <span v-if="isMaster" class="system-cmd cmd-collect">
+            <span class="marisa-cmd">block &lt;uid&gt;</span> / <span class="marisa-cmd">delete &lt;回答&gt;</span>（调教师）
+          </span>
+          <div class="cmd_desc">
+            另外你也可以通过输入
+            <span style="font-weight: bold">hint</span> 查看其他人自定义的内容提示或小小线索
+            <div class="cmd_desc_content">
+              魔理沙无条件的相信你..她把你交给她的所有知识视作珍宝并会很认真的将其牢牢记住..不要让她学坏哦!(想教坏也没用,有ai审核)
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Core, type TalkItem } from '../core'
+import { getUid } from '../core/identity'
+
+const MARISA = '白絲魔理沙'
+const YOU = 'You'
+
+// 匿名身份(uid):localStorage UUID;P2 好感 / P4 flag 定向 / P5 留痕共用
+const uid = getUid()
+// 好感度是否开启(FEATURE_FAVOR):挂载时探测一次 /Favor,开启才显示好感与发心跳
+const favorEnabled = ref(false)
+// 调教师判定(P5):本地 uid 与构建期配置 VITE_MASTER_UID 一致才渲染 block/delete 指令
+// (MASTER_UID 同时要在后端 server-py/.env 配置,权限判定只信服务端)
+const isMaster = computed(() => !!import.meta.env.VITE_MASTER_UID && uid === import.meta.env.VITE_MASTER_UID)
+
+// 对话记录列表
+const talkList = ref<TalkItem[]>([])
+// 输入框内容(v-model 双向绑定)
+const inputText = ref('')
+// 模板引用
+const youInput = ref<HTMLInputElement | null>(null)
+const talkPlace = ref<HTMLDivElement | null>(null)
+// 好感心跳定时器(P2)
+let heartbeatTimer: number | undefined
+
+// 教学模式标志:0 = 普通对话,1 = 教学中
+let cmdFlag = 0
+// 教学计数:第 1 次输入关键词,第 2 次输入回答
+let teachFlag = 0
+// 教学过程中收集的关键词 / 回答
+let teachContent: string[] = []
+// 当前教学分类(teach word / sentence / syntax / logic / greeting / auto,默认 auto 自动判断)
+let teachCategory = 'auto'
+
+// 教学分类的中文名(与后端 TEACH_CATEGORIES 对应)
+const CATEGORY_LABELS: Record<string, string> = {
+  word: '词汇',
+  sentence: '句型',
+  syntax: '文法',
+  logic: '逻辑',
+  greeting: '问候语',
+  auto: '自动',
+  unclassified: '未分类',
+}
+
+/**
+ * 发送消息:回车或点击发送按钮触发。
+ * 空内容时魔理沙会吐槽一句;否则先记下 You 的话,再根据当前模式处理。
+ */
+async function sendMessage() {
+  const content = inputText.value.trim()
+  if (content === '') {
+    talkList.value.push(Core.speak(MARISA, 'ん？ 你说了什么咩 ¿'))
+    return
+  }
+
+  talkList.value.push(Core.speak(YOU, content))
+  if (cmdFlag === 0) {
+    await marisaThinking(content)
+  } else {
+    await teachMarisa(content)
+  }
+  inputText.value = ''
+}
+
+/** 普通对话模式:识别 teach / forget / status / hint / block / delete 指令,否则交给魔理沙回复 */
+async function marisaThinking(content: string) {
+  // teach 支持分类:teach / teach word / teach word 关键词 / teach auto ...
+  const teachMatch = content.match(/^teach(?:\s+(word|sentence|syntax|logic|greeting|auto))?(?:\s+(.+))?$/i)
+  if (teachMatch) {
+    await startTeach((teachMatch[1] ?? 'auto').toLowerCase(), (teachMatch[2] ?? '').trim())
+    return
+  }
+  // block <target_uid> [unblock] / delete <answer>(P5 调教师指令,仅本地 uid == MASTER_UID 时响应)
+  if (isMaster.value) {
+    const blockMatch = content.match(/^block(?:\s+(.+))?$/i)
+    if (blockMatch) {
+      await marisaBlock(blockMatch[1] ?? '')
+      return
+    }
+    const deleteMatch = content.match(/^delete(?:\s+(.+))?$/i)
+    if (deleteMatch) {
+      await marisaDelete(deleteMatch[1] ?? '')
+      return
+    }
+  }
+  switch (content) {
+    case 'forget':
+      await marisaForget()
+      break
+    case 'status':
+      await marisaStatus()
+      break
+    case 'hint':
+      await marisaHint()
+      break
+    case 'miss':
+      await marisaMiss()
+      break
+    default:
+      await marisaReply(content)
+  }
+}
+
+/** 启动教学模式:category 指定分类,keyword 非空时直接作为第一轮输入(teach word 关键词 用法) */
+async function startTeach(category: string, keyword: string) {
+  teachCategory = category
+  const catLabel = CATEGORY_LABELS[category] ?? category
+  if (category === 'greeting') {
+    // greeting 是单条问候语(开场白),不是问答对:输入一句问候语即可,一轮完成
+    talkList.value.push(
+      Core.speak(
+        MARISA,
+        '要教给魔里沙什么 ..? 问候语教学:直接输入一句问候语就行(或 teach greeting 问候语 一步完成),访问网站时魔理沙会用这句话跟你打招呼。中止教学输入 exit ..',
+      ),
+    )
+    talkList.value.push(Core.speak(MARISA, '（ < ゝω·）教学模式启动 ！'))
+    cmdFlag = 1
+    if (keyword) {
+      // teach greeting 你好呀:问候语已给出,直接完成教学
+      const ok = await Core.teach('`' + keyword, 'greeting')
+      talkList.value.push(Core.speak(MARISA, ok ? '行，我知道了' : '魔理沙不想记住 . . . . . . 对不起'))
+      cmdFlag = 0
+      teachCategory = 'auto'
+    }
+    return
+  }
+  talkList.value.push(
+    Core.speak(
+      MARISA,
+      `要教给魔里沙什么 ..? 教学分类:${catLabel}(${category})。也可用 teach word/sentence/syntax/logic/greeting 指定分类,不确定就 teach auto 自动判断。中止教学输入 exit ..`,
+    ),
+  )
+  talkList.value.push(Core.speak(MARISA, '（ < ゝω·）教学模式启动 ！'))
+  cmdFlag = 1
+  if (keyword) {
+    // teach word 关键词:直接进入第一轮(关键词已给出),下一轮输入回答
+    teachFlag = 1
+    teachContent = [keyword]
+    talkList.value.push(Core.speak(MARISA, '那么 ... 在这样的情况下该如何回答呢 ..?'))
+  }
+}
+
+/** 教学模式:greeting 单轮输入问候语;其他分类 第一步输入关键词,第二步输入回答(内部用反引号拼成 关键词`回答) */
+async function teachMarisa(content: string) {
+  // 这些指令都会中止教学
+  if (content === 'exit' || content === 'teach' || content === 'forget' || content === 'status') {
+    talkList.value.push(Core.speak(YOU, '白絲魔理沙，退出学习模式'))
+    cmdFlag = 0
+    return
+  }
+
+  // greeting 问候语模式:单轮,输入即问候语(无关键词)
+  if (teachCategory === 'greeting') {
+    const ok = await Core.teach('`' + content, 'greeting')
+    talkList.value.push(Core.speak(MARISA, ok ? '行，我知道了' : '魔理沙不想记住 . . . . . . 对不起'))
+    cmdFlag = 0
+    teachFlag = 0
+    teachContent = []
+    teachCategory = 'auto'
+    return
+  }
+
+  if (teachFlag === 0) {
+    talkList.value.push(Core.speak(MARISA, '那么 ... 在这样的情况下该如何回答呢 ..?'))
+  }
+
+  teachFlag++
+  teachContent.push(content)
+
+  // 收集到"关键词 + 回答"后,交给教学逻辑(携带当前教学分类)
+  if (teachFlag > 1) {
+    const query = teachContent.join('`')
+    const ok = await Core.teach(query, teachCategory)
+    talkList.value.push(Core.speak(MARISA, ok ? '行，我知道了' : '魔理沙不想记住 . . . . . . 对不起'))
+    cmdFlag = 0
+    teachFlag = 0
+    teachContent = []
+    teachCategory = 'auto'
+  }
+}
+
+/** 向魔理沙提问 */
+async function marisaReply(content: string) {
+  const answer = await Core.reply(content)
+  talkList.value.push(Core.speak(MARISA, answer ?? '唔嗯 ...  不懂你在说什么呢 ...  教教我吧 ..'))
+}
+
+/** 忘记最后一次所说的内容 */
+async function marisaForget() {
+  const ok = await Core.forget(talkList.value)
+  talkList.value.push(
+    Core.speak(MARISA, ok ? '这句话魔理沙说错了么 ... 呜呜呜对不起 ...' : '魔理沙这阵子不太想忘记东西的样子 ..'),
+  )
+}
+
+/** 查看当前知识条数 */
+async function marisaStatus() {
+  const weight = await Core.status()
+  if (weight) {
+    // 分类明细:只展示有内容的分类,如(问候语 5 条、词汇 12 条)
+    let detail = ''
+    const cats = await Core.categories()
+    if (cats) {
+      const parts = Object.entries(cats)
+        .filter(([, n]) => n > 0)
+        .map(([k, n]) => `${CATEGORY_LABELS[k] ?? k} ${n} 条`)
+      if (parts.length) detail = `（${parts.join('、')}）`
+    }
+    // 好感度(P2,FEATURE_FAVOR 开启时):在脑重量后显示,如(好感:普通 128 分)
+    let favorText = ''
+    if (favorEnabled.value) {
+      const f = await Core.favor(uid)
+      if (f) favorText = `（好感:${f.level_name} ${f.score} 分）`
+    }
+    talkList.value.push(
+      Core.speak(
+        MARISA,
+        `目前魔理沙的脑重量是 ${weight} 克${detail}${favorText}。如果我现在还不能理解您的意思的话，请教给我更多的知识，我会非常非常用心学习的～`,
+      ),
+    )
+  } else {
+    talkList.value.push(Core.speak(MARISA, '我的记忆要一片混乱了 ...'))
+  }
+}
+
+/** 调教师屏蔽/解除屏蔽(P5,FEATURE_MAID):用法 block <目标 uid> [unblock] */
+async function marisaBlock(arg: string) {
+  const parts = arg.trim().split(/\s+/)
+  const targetUid = parts[0] || ''
+  const action = parts[1] === 'unblock' ? 'unblock' : 'block'
+  if (!targetUid) {
+    talkList.value.push(Core.speak(MARISA, '用法:block <目标 uid> [unblock]'))
+    return
+  }
+  const ok = await Core.block(uid, targetUid, action)
+  talkList.value.push(
+    Core.speak(MARISA, ok ? (action === 'unblock' ? '已解除屏蔽' : '已屏蔽该用户') : '操作失败(未开启或没有权限)'),
+  )
+}
+
+/** 调教师删除任意条目(P5,FEATURE_MAID):用法 delete <回答原文> */
+async function marisaDelete(answer: string) {
+  if (!answer.trim()) {
+    talkList.value.push(Core.speak(MARISA, '用法:delete <回答原文>'))
+    return
+  }
+  const ok = await Core.adminDelete(uid, answer.trim())
+  talkList.value.push(Core.speak(MARISA, ok ? '已删除' : '删除失败(未开启或没有权限)'))
+}
+
+/** 查看提示线索:随机展示一条已审核通过的记忆 */
+async function marisaHint() {
+  const hint = await Core.hint()
+  if (hint) {
+    talkList.value.push(
+      Core.speak(MARISA, `给你个小小线索：试试「${hint.keyword}」—— 有人教过：${hint.answer}`),
+    )
+  } else {
+    talkList.value.push(Core.speak(MARISA, '唔 ... 现在还没有任何线索可以给你，快教教我点什么吧 ~'))
+  }
+}
+
+/** 查看待学习清单:展示"别人问了但没答上"的关键词,逐条引导教学 */
+async function marisaMiss() {
+  const list = await Core.misses()
+  if (list.length === 0) {
+    talkList.value.push(Core.speak(MARISA, '唔 ... 现在还没有没答上来的问题,大家都把魔理沙喂饱饱的 ~'))
+    return
+  }
+  for (const item of list) {
+    talkList.value.push(
+      Core.speak(
+        MARISA,
+        `有人问过「${item.keyword}」${item.count} 次没答上,试试 teach ${item.keyword}\`回答\`~`,
+      ),
+    )
+  }
+}
+
+/** 滚动对话区到底部 */
+function scrollBottom() {
+  const el = talkPlace.value
+  if (el) {
+    el.scrollTop = el.scrollHeight
+  }
+}
+
+// 对话列表变化后(DOM 更新完)自动滚到底部
+watch(
+  () => talkList.value.length,
+  () => scrollBottom(),
+  { flush: 'post' },
+)
+
+onMounted(async () => {
+  // 初始自动聚焦输入框(还原旧版 v-focus 指令效果)
+  youInput.value?.focus()
+  // 好感度(P2,FEATURE_FAVOR):探测一次 /Favor,开启才显示好感 + 每 60s 发一次心跳(off 时前端不调)
+  const f = await Core.favor(uid)
+  if (f) {
+    favorEnabled.value = true
+    heartbeatTimer = window.setInterval(() => {
+      Core.active(uid, 60)
+    }, 60_000)
+  }
+  // greeting 开场白:访问网站时自动随机发一条问候类记忆(2010-2011 原版语义,无则静默)
+  const g = await Core.greeting()
+  if (g) {
+    talkList.value.push(Core.speak(MARISA, g.answer))
+  }
+})
+
+// 卸载时清理心跳定时器
+onUnmounted(() => {
+  if (heartbeatTimer !== undefined) {
+    clearInterval(heartbeatTimer)
+  }
+})
+</script>
+
+<style lang="scss" scoped>
+@use '../assets/css/variables' as *;
+
+.chatroom {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 712px;
+  height: 512px;
+  background: $box-color;
+  border: 1px solid $border-color;
+}
+
+.container {
+  display: flex;
+  justify-content: space-between;
+  margin: 0 auto;
+  margin-top: 6px;
+  width: 700px;
+  height: 502px;
+}
+
+.talk-panel {
+  width: 470px;
+  height: 500px;
+  background: $container-color;
+  border: 1px solid $border-color;
+
+  > span {
+    display: block;
+    width: 100%;
+    height: 40px;
+    background: $title-color;
+    border-bottom: 1px solid $border-color;
+    font-size: 14px;
+    line-height: 40px;
+    text-indent: 9px;
+    color: $order-blue;
+  }
+
+  .talk-place {
+    width: calc(100% - 10px);
+    height: 420px;
+    padding-left: 10px;
+    overflow-y: scroll;
+
+    .talk_entry {
+      width: 100%;
+      font-size: 14px;
+      margin-top: 12px;
+      word-break: break-all;
+      line-height: 25px;
+
+      .talk_item {
+        display: inline;
+        background: transparent;
+        border: none;
+        line-height: 0;
+      }
+    }
+  }
+
+  .speak {
+    width: 100%;
+    height: 39px;
+
+    input {
+      background: none;
+      outline: 0;
+      border: none;
+    }
+
+    & input[name='you'] {
+      position: relative;
+      top: 10px;
+      left: 5px;
+      width: 382px;
+      height: 24px;
+      padding-left: 5px;
+      background: #ffffff;
+      border: 1px solid $border-color;
+      transition: all 0.2s;
+
+      &:hover, &:focus {
+        background: #ffffff;
+        border-radius: 5px;
+      }
+    }
+
+    & input[type='submit'] {
+      position: relative;
+      top: 9px;
+      left: 15px;
+      width: 48px;
+      height: 22px;
+      background: #ffffff;
+      border: 1px solid $border-color;
+      border-radius: 5px;
+      font-size: 12px;
+      transition: all 0.2s;
+    }
+  }
+}
+
+.profile {
+  width: 220px;
+  height: 502px;
+
+  .avatar {
+    width: 218px;
+    height: 250px;
+    border: 1px solid $border-color;
+    background-image: url('./img/marisa.jpg');
+    background-size: 333px;
+    background-repeat: no-repeat;
+    background-position: 58% 2%;
+    margin-bottom: 8px;
+  }
+
+  .cmd {
+    width: 202px;
+    height: 232px;
+    padding: 4px 8px;
+    overflow-y: auto;   /* 指令说明随内容增多,超出滚动而非溢出框体 */
+    overflow-x: hidden; /* 长英文(如 word/sentence/...)折行,不出水平滚动条 */
+    word-break: break-all;
+    background: $container-color;
+    border: 1px solid $border-color;
+    color: $order-blue;
+    font-size: 12px;
+
+    .system-cmd {
+      display: block;
+      width: 100%;
+      margin-bottom: 10px;
+      margin-top: 10px;
+    }
+
+    .cmd-collect {
+      text-indent: 1em;
+    }
+
+    .marisa-cmd {
+      display: inline;
+      font-weight: bold;
+      font-family: sans-serif;
+      font-size: 13px;
+    }
+
+    .cmd_desc {
+      position: relative;
+      top: -2px;
+      line-height: 15px;
+
+      .cmd_desc_content {
+        margin-top: 10px;
+        line-height: 15px;
+      }
+    }
+  }
+}
+
+.you_color {
+  // 旧版注释: color: #836FFF !important
+  color: #4876FF !important;
+}
+</style>
