@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 用户提问行:深色半透明(AI 白、用户深,便于区分;背景同样透出来)。
-     文字用白色 + 阴影。 -->
+<!-- 斑马纹 · 深带。原版实测约 RGB(16,64,144) 一带,这里取半透明蓝。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#8C14365E" />
+    <solid android:color="#CC1B4A94" />
 </shape>

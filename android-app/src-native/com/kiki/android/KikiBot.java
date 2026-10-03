@@ -137,6 +137,16 @@ public class KikiBot {
 
     // ======================= 只读属性(Kotlin 的 val/get) =======================
 
+    /**
+     * 暴露内部的事实引擎。
+     *
+     * 为什么需要:事实库有 1795 条,重复 new 一份会白占内存,也导致
+     * "用户教的知识"只进其中一份、两边不同步。共用同一个实例才行。
+     */
+    public Brain getBrain() {
+        return brain;
+    }
+
     public int getFactCount() {
         return brain.getFactCount();
     }
@@ -205,6 +215,19 @@ public class KikiBot {
     // ======================= 分词 / 质量闸 =======================
 
     /** 去掉虚词,只留实义词 */
+    /**
+     * 这个字符串是不是词表里的词 —— 供语言总结校验拼接结果。
+     * (必须有这一步:否则"基础的基，朋友的友"会拼出任何两字组合。)
+     */
+    public boolean isWord(String w) {
+        return w != null && w.length() >= 2 && words.contains(w);
+    }
+
+    /** 分词(给语言总结用;segment 本身是 private) */
+    public List<String> segmentPublic(String text) {
+        return segment(text);
+    }
+
     public List<String> contentTokens(String text) {
         List<String> out = new ArrayList<String>();
         for (String t : segment(text)) {
@@ -405,7 +428,8 @@ public class KikiBot {
      *   "XX是什么" -> "XX 是什么？"
      * 问句会被记住,用户下一句话就作为答案学下来。
      */
-    private Answer askBack(String raw) {
+    /** 兜底反问。public:对话状态机也要用它。 */
+    public Answer askBack(String raw) {
         String subject = raw;
         String question = null;
         // 剥掉疑问尾巴,留下真正要问的主语
@@ -476,6 +500,62 @@ public class KikiBot {
     }
 
     /** Kotlin 的 {@code String.trim()}(包内共用:MainActivity 也调它,保证两边同一套语义)。 */
+    /** 对外别名:语义与 ktTrim 相同(Kotlin 的 trim)。 */
+    static String trim(String s) {
+        return ktTrim(s);
+    }
+
+    /** 疑问尾巴表:"X是谁/是什么/在哪…"。剥掉它剩下的就是主语。 */
+    private static final String[] QUESTION_TAILS = {
+            "是什么东西", "是什么", "是啥", "是谁", "在哪里", "在哪",
+            "怎么样", "为什么", "有多少", "有几", "是多少", "怎么用", "怎么",
+    };
+
+    /**
+     * 剥掉疑问尾巴,留下要问的主语。
+     * "卡卡是什么" -> 卡卡    "东吴是谁建立的" -> 东吴(建立 不在表里,另行处理)
+     */
+    public String stripQuestionTail(String s) {
+        if (s == null) return "";
+        String t = ktTrim(s);
+        // 去掉尾部标点
+        while (t.length() > 0) {
+            char c = t.charAt(t.length() - 1);
+            if (c == '？' || c == '?' || c == '。' || c == '！' || c == '!' || c == '，') {
+                t = t.substring(0, t.length() - 1);
+            } else break;
+        }
+        for (String tail : QUESTION_TAILS) {
+            if (t.endsWith(tail) && t.length() > tail.length()) {
+                return ktTrim(t.substring(0, t.length() - tail.length()));
+            }
+        }
+        // "X是谁<动词>的" 这类:截到"是谁"之前
+        int i = t.indexOf("是谁");
+        if (i > 0) return ktTrim(t.substring(0, i));
+        return ktTrim(t);
+    }
+
+    /**
+     * 识别"逆关系"问句:X是谁建立的/发明的/写的/发现的。
+     * 返回关系词(建立/发明/写/发现),识别不出返回 null。
+     */
+    public String detectReverseRelation(String s) {
+        if (s == null) return null;
+        String t = ktTrim(s);
+        // 形如 "X是谁<动词>的" / "谁<动词>了X"
+        String[][] verbs = {
+                {"建立", "建立"}, {"创建", "建立"}, {"创立", "建立"}, {"成立", "建立"},
+                {"发明", "发明"}, {"发现", "发现"}, {"写", "写"}, {"编写", "写"},
+                {"画", "画"}, {"建造", "建造"}, {"设计", "设计"}, {"提出", "提出"},
+                {"开创", "建立"}, {"首都是", "首都"}, {"的省会", "省会"},
+        };
+        for (String[] v : verbs) {
+            if (t.contains(v[0])) return v[1];
+        }
+        return null;
+    }
+
     static String ktTrim(String s) {
         if (s == null) return "";
         int start = 0;

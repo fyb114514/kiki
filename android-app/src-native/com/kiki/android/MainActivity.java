@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -37,11 +38,16 @@ public class MainActivity extends Activity {
 
     /** 说话区:空闲深灰、录音中绿(给用户明确反馈) */
     private static final int TALK_IDLE = 0xFF3C3C3C;
-    private static final int TALK_RECORDING = 0xFF3E7A46;
+
+    /**
+     * 横带上的文字颜色 —— **深色**(用户确认:两种带上都是深色字)。
+     * 用近黑的深蓝,而不是纯黑,和蓝色横带更搭。
+     */
+    private static final int STRIPE_TEXT = 0xFF0E2438;
 
     private KikiBot bot;
     /** 神经语言模型 + 本地记忆(对应原作者的"本地+网络") */
-    private ChatBrain brain;
+    private KikiBrain brain;
     private Store store;
     private SpeechManager speech;
     private OfflineRecognizer offline;
@@ -50,12 +56,40 @@ public class MainActivity extends Activity {
     private LinearLayout messages;
     private ScrollView scroll;
     private FrameLayout talkArea;
-    private TextView talkHint;
 
     /** 会话记录(旋转屏幕后重建) */
     private final List<String[]> history = new ArrayList<String[]>();
+
+    /** 底部那条左右游走的红色条 = "我在听" */
+    /** 特性 2:用户偏好画像(观察说话习惯并反向适应) */
+    private PrefProfiler prefProfiler;
+    /** 特性 2:联网学习(维基抓取) */
+    private NetworkLearner netLearner;
+
+    private ListeningBar listenBar;
+
+    /** 开场白(等 TTS 就绪后再念;TTS 初始化实测要约 2.3 秒) */
+    private String pendingGreeting = null;
+    /** 开场白是否已念过(防止 TTS 回调与超时兜底重复触发) */
+    private boolean greetSpoken = false;
+
+    /** 是否处于"自动对话循环"中(避免重入) */
+    private volatile boolean autoLoop = false;
+
+    /** 防止 TTS 播完回调在这台机器上不触发 —— 用超时兜底 */
+    private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable autoListen = new Runnable() {
+        @Override
+        public void run() {
+            android.util.Log.i("kiki-loop", "autoListen 触发");
+            beginListening();
+        }
+    };
     /** 是否正在录音(长按期间为 true) */
     private volatile boolean recording = false;
+
+    /** 正在思考/等回答(期间不收音,避免把她的声音录进去) */
+    private volatile boolean thinking = false;
     /** 条纹计数:让 kiki/用户的每一行交替深浅 */
     private int rowIndex = 0;
 
@@ -65,11 +99,14 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         messages = (LinearLayout) findViewById(R.id.messages);
+
         scroll = (ScrollView) findViewById(R.id.scroll);
         talkArea = (FrameLayout) findViewById(R.id.talkArea);
-        talkHint = (TextView) findViewById(R.id.talkHint);
-        // FrameLayout 上 XML 的 background 在部分 ROM 会被忽略,这里用代码再设一次
-        talkArea.setBackgroundColor(TALK_IDLE);
+        listenBar = (ListeningBar) findViewById(R.id.listenBar);
+        // 【重要】这里**不要**再 setBackgroundColor ——
+        // 布局里给的是半透明 #B03C3C3C,而代码里写死 #FF3C3C3C 会把它变成不透明,
+        // 用户反馈"底部灰色条不透明"就是这么来的(之前误以为 XML 的 background
+        // 在部分 ROM 会被忽略,实测这个担心不成立)。
 
         bot = new KikiBot(getAssets());
         try {
@@ -79,30 +116,41 @@ public class MainActivity extends Activity {
             store = null;
         }
 
-        setupTalkArea();
         // 引擎自检:真机上跑一遍推理用例(结果见 logcat tag kiki-engine)
         // 放到独立线程:它要建第二个引擎(载入全部 assets),
         // 在主线程做会拖慢启动、并和语音初始化抢资源。
         new Thread(new Runnable() {
             @Override
             public void run() {
-                EngineSelfTest.run(getAssets());
+                EngineSelfTest.run(getAssets());   // 20 条推理用例
+                DialogSelfTest.run();               // 主动学习闭环(特性 1 的核心)
+                Feature2SelfTest.run(MainActivity.this);   // 特性 2 自检
+                SummarizerSelfTest.run(MainActivity.this);   // 语言总结自检
             }
         }, "kiki-engine-t").start();
+        // 临时 UI 测试模式(--ez uitest true 启动时进入)
         initTts();
         initOfflineAsr();
         initBrain();
-        initLlm();
-        llmSelfTest();
 
-        // 进入时**不显示任何文字** —— 用户要求把开场白也去掉。
-        //
-        // 原版 kiki 会在进入时先说一句(随机 greeting),但用户希望界面干净到底:
-        // 屏幕上只有背景图和底部说话区,没有任何消息行。
-        // 开场白仍然保留在数据里(greeting.txt),只是进入时不再自动上屏 ——
-        // 想恢复只需把下面两行注释放开。
-        // String greet = bot.randomGreeting();
-        // if (greet != null) addMessage("kiki", greet);
+        // 开场白:原版进入时会先说一句(截图里的"欢迎回来"),用户确认要恢复
+        // 开场白必须等 TTS 就绪再播 —— 实测 TTS 初始化要约 2.3 秒,
+        // 之前直接播会被 speak() 以 "ttsReady=false" 跳过(开场白静音,
+        // 而且随后立刻开听,用户以为她没说话)。
+        final String greet = bot.randomGreeting();
+        pendingGreeting = greet;
+        if (greet != null) addMessage("kiki", greet);
+        // 兜底:即使 TTS 回调不来,6 秒后也进入监听,避免对话卡死
+        ui.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (!greetSpoken) {
+                    greetSpoken = true;
+                    android.util.Log.i("kiki-loop", "TTS 未就绪兜底:直接开始听");
+                    ui.postDelayed(autoListen, 300);
+                }
+            }
+        }, 6000);
     }
 
     /**
@@ -115,204 +163,139 @@ public class MainActivity extends Activity {
         android.util.Log.i("kiki-notify", msg == null ? "" : msg);
     }
 
-    // ---------------- 说话区交互 ----------------
-    /** 本次录音是否由"点一下"启动(决定松手时要不要停) */
-    private boolean tapMode = false;
+    // ---------------- 自动对话循环(原版没有按钮) ----------------
+    //
+    // 原版行为(用户口述):
+    //   "他是自己说完几句话就会开始识别,不需要用户动手点击或长按"
+    //
+    // 所以这里没有任何触摸监听。循环是:
+    //   她说完(TTS onDone) -> 自动开录 -> 静音判定结束 -> 识别 -> 思考 -> 回答 -> 回到开头
+    //
+    // 红色移动条(叫 listenBar)在"等她说话"时显示,在她说话/处理时隐藏。
 
-    /**
-     * 说话区交互 —— 同时支持两种习惯,但**绝不允许卡住**:
-     *
-     *   长按(按住说话):按下开始,松手立刻停。这是原版行为,最可靠。
-     *   点一下:点一下开始,说完自动停(靠静音判定收尾);想立刻结束就再点一下。
-     *
-     * 【踩过的坑】上一版短按也去调 startRecording(),于是第二次点击时
-     * recording 已经是 true、startRecording 直接返回;而 ACTION_UP 时
-     * 因为按住时间 < 400ms 又不调 stopRecording() —— 结果**再也停不下来**。
-     * 用户反馈原话:"长按正常,但是点击只有第一次可选"。
-     *
-     * 现在规则很简单:**只要正在录音,下一次触摸无论多短都算"停止"**。
-     */
-    private void setupTalkArea() {
-        talkArea.setOnTouchListener(new View.OnTouchListener() {
-            private long downAt = 0L;
-
-            @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                switch (event.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        downAt = System.currentTimeMillis();
-                        android.util.Log.i("kiki-touch", "DOWN recording=" + recording + " offlineReady=" + offlineReady);
-                        if (recording) {
-                            // 已在录音:这次触摸一律当"停止",绝不卡死
-                            stopRecording();
-                            tapMode = false;
-                            return true;
-                        }
-                        tapMode = true;              // 先假定是"点一下"
-                        startRecording();
-                        return true;
-                    case MotionEvent.ACTION_UP:
-                    case MotionEvent.ACTION_CANCEL:
-                        if (!recording) return true;
-                        long held = System.currentTimeMillis() - downAt;
-                        if (held >= 400) {
-                            stopRecording();         // 长按习惯:松手即停
-                            tapMode = false;
-                        } else if (tapMode) {
-                            // 短按:继续录,交给静音判定收尾
-                            setHint("● 正在录音…\n（松开或再点一下就结束）");
-                        }
-                        return true;
-                    default:
-                        return true;
-                }
-            }
-        });
-    }
-
-    private void startRecording() {
-        if (recording) return;
+    /** 进入"等她说话"状态:显示红色条 + 开录音 */
+    private void beginListening() {
+        android.util.Log.i("kiki-loop", "beginListening: offlineReady=" + offlineReady
+                + " recording=" + recording + " thinking=" + thinking);
+        if (isFinishing()) return;
         if (!offlineReady) {
-            setHint("还在准备离线语音,稍等一下…");
+            android.util.Log.i("kiki-loop", "模型未就绪,1.5 秒后重试");
+            // 模型还没装好,等一会儿再试(首次启动会解压 42MB 语音模型)
+            ui.postDelayed(autoListen, 1500);
             return;
         }
+        if (recording || thinking) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
             return;
         }
         recording = true;
-        // 视觉反馈要**非常明确**:用户反馈"点一下之后要点第二次才开始录",
-        // 实际日志证明第一次点击就已经在录了(DOWN recording=false → startRecording),
-        // 只是提示不够醒目、颜色变化看不出来,让人以为还没开始。
-        talkArea.setBackgroundColor(TALK_RECORDING);
-        setHint("● 正在录音…\n（松开或再点一下就结束）");
+        // 【用户最终确认】红条"只在 AI 说话时出现" ——
+        // 所以等待用户说话期间**不显示**。这里不要再 start()。
+        android.util.Log.i("kiki-loop", "开始录音(等待用户说话,红条隐藏) offline.isBusy="
+                + offline.isBusy());
         try {
             offline.start();
         } catch (Throwable t) {
+            android.util.Log.e("kiki-loop", "启动录音异常: " + t);
             recording = false;
-            talkArea.setBackgroundColor(TALK_IDLE);
-            setHint("启动录音失败: " + t.getMessage());
+            if (listenBar != null) listenBar.stop();
+            ui.postDelayed(autoListen, 2000);
         }
     }
 
-    private void stopRecording() {
-        if (!recording) return;
+    /** 识别到一句话之后:停红条 -> 思考 -> 回答 -> 再听 */
+
+    /**
+     * 念出回答,**念完自动开始听**。
+     *
+     * 兜底:TTS 引擎缺失或 onDone 不回调时,用一个按字数估算的超时来推进循环,
+     * 否则对话会停在那里再也不动。
+     */
+    private void speakThenListen(String text) {
+        final boolean[] advanced = new boolean[1];
+        final Runnable go = new Runnable() {
+            @Override
+            public void run() {
+                android.util.Log.i("kiki-loop", "准备开听 (advanced=" + advanced[0] + ")");
+                if (advanced[0]) return;
+                advanced[0] = true;
+                // 她说完了 -> 红条收起(之后进入"等你说话",按新语义不显示)
+                if (listenBar != null) listenBar.stop();
+                ui.removeCallbacks(autoListen);
+                ui.postDelayed(autoListen, 350);   // 留一点停顿,别抢话
+            }
+        };
+
+        boolean spoke = false;
+        if (speech != null) {
+            try {
+                speech.onSpeakDone = go;
+                speech.speak(text);
+                spoke = speech.isChineseAvailable();
+            } catch (Throwable ignored) {
+                spoke = false;
+            }
+        }
+        android.util.Log.i("kiki-loop", "speakThenListen: spoke=" + spoke
+                + " textLen=" + (text == null ? 0 : text.length()));
+        // AI 说话期间显示红条 —— 这是红条**唯一**出现的时机
+        if (listenBar != null) listenBar.start();
+        if (!spoke) {
+            // 没引擎:等一个按字数估的时间,让用户看清字,然后继续
+            int ms = Math.min(9000, 900 + (text == null ? 0 : text.length()) * 180);
+            android.util.Log.i("kiki-loop", "无 TTS 引擎,兜底 " + ms + "ms 后开听");
+            ui.postDelayed(go, ms);
+        } else {
+            // 引擎在,但 onDone 可能不触发 —— 按字数估一个上限兜底
+            int ms = Math.min(30000, 4000 + (text == null ? 0 : text.length()) * 320);
+            android.util.Log.i("kiki-loop", "已排定开听: 兜底上限 " + ms + "ms");
+            ui.postDelayed(go, ms);
+        }
+    }
+
+    /** 用户手动打断:停止一切 */
+    private void stopAll() {
+        ui.removeCallbacks(autoListen);
         recording = false;
-        talkArea.setBackgroundColor(TALK_IDLE);
+        thinking = false;
+        if (listenBar != null) listenBar.stop();
         try {
-            offline.stop();
+            if (offline != null) offline.stop();
         } catch (Throwable ignored) {
         }
-        setHint("…识别中…");
+        try {
+            if (speech != null) speech.stopSpeaking();
+        } catch (Throwable ignored) {
+        }
     }
 
     /**
-     * 对话模型自检:载入完成后自动问一句,把回答写进 logcat(tag kiki-llm)。
-     * 排障用 —— 否则没有语音输入就永远看不到模型输出。
+     * 底部提示文字 —— 按用户要求**不再显示**。
+     * 原版这里没有任何文字,只有那条游走的红色条。
      */
-    private void llmSelfTest() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    // 只跑一次(用 SharedPreferences 记标记)。
-                    // 自检要生成 3 次,每次几秒 —— 不加这个标记的话每次启动都白耗一次电。
-                    android.content.SharedPreferences sp =
-                            getSharedPreferences("kiki_llm_test", MODE_PRIVATE);
-                    if (sp.getBoolean("done", false)) return;
-
-                    // 等模型接入(最多 120 秒)
-                    for (int i = 0; i < 120 && !brain.hasLlm(); i++) Thread.sleep(1000);
-                    if (!brain.hasLlm()) {
-                        android.util.Log.w("kiki-llm", "自检跳过:对话模型未就绪");
-                        return;
-                    }
-                    android.util.Log.i("kiki-llm", "=== 对话模型自检开始 ===");
-                    String[] qs = {"你好", "你是谁", "我好累啊"};
-                    for (String q : qs) {
-                        long t0 = System.currentTimeMillis();
-                        Answer a = brain.reply(q);
-                        android.util.Log.i("kiki-llm", "问: " + q + "  ->  " + a.text
-                                + "   (" + (System.currentTimeMillis() - t0) + " ms)");
-                    }
-                    // 顺便自检 TTS:念一句,验证语音合成真的出声
-                    if (speech != null) {
-                        android.util.Log.i("kiki-tts", "自检: 准备朗读一句");
-                        speech.speak("你好，我是kiki，语音合成测试。");
-                    }
-                    android.util.Log.i("kiki-llm", "=== 对话模型自检结束 ===");
-                    sp.edit().putBoolean("done", true).apply();
-                } catch (Throwable t) {
-                    android.util.Log.e("kiki-llm", "自检异常: " + t);
-                }
-            }
-        }, "kiki-llm-test").start();
+    private void setHint(String s) {
+        // 刻意留空
     }
 
-    // ---------------- 真正的对话模型(ONNX) ----------------
-    /**
-     * 后台载入 Qwen2.5-0.5B。首次要把 460MB 模型从 assets 释放到私有目录(约 1~2 秒),
-     * 之后直接复用。载入完成前她走规则引擎,载入后就能正常聊天了。
-     */
-    private void initLlm() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            notifyUi("正在载入对话模型(首次约几秒)…");
-                        }
-                    });
-                    final LlmEngine e = LlmBootstrap.init(MainActivity.this,
-                            ChatBrain.SYSTEM_PROMPT);
-                    if (e != null && e.isReady()) {
-                        brain.setLlm(e);
-                        runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                notifyUi("对话模型已就绪,现在我能好好说话了~");
-                            }
-                        });
-                    } else {
-                        runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                notifyUi("对话模型载入失败,先用规则引擎回答");
-                            }
-                        });
-                    }
-                } catch (Throwable t) {
-                    android.util.Log.e("kiki-llm", "initLlm 失败: " + t);
-                }
-            }
-        }, "kiki-llm-init").start();
-    }
+    // ---------------- 对话大脑 ----------------
 
-    // ---------------- 神经语言模型 ----------------
     /**
-     * 初始化对话大脑:加载/训练神经语言模型。
-     * 首次运行要训练(1-2 分钟,后台跑),期间界面照常能用(走检索引擎)。
+     * 初始化对话大脑。
+     *
+     * 不再有任何"训练"步骤 —— 这里完全不跑语言模型:
+     * 回答靠规则引擎(事实检索 + 因果推导)与对话状态机(主动学习)。
+     * 装载 1795 条事实是瞬时的,所以不需要后台线程。
      */
     private void initBrain() {
-        brain = new ChatBrain(this, bot);
-        brain.init(new ChatBrain.Status() {
-            @Override
-            public void onStatus(final String message) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        notifyUi(message);
-                    }
-                });
-                // 模型就绪后跑一次自我进化自检(只跑一次,开发者探针)
-                if (message != null && message.contains("训练完成")) {
-                    SelfTest.runOnceIfNeeded(MainActivity.this, brain);
-                }
-            }
-        });
+        brain = new KikiBrain(this, bot, bot.getBrain());
+        brain.setStore(store);
+        // 特性 2:偏好画像 + 联网学习
+        if (store != null) {
+            prefProfiler = new PrefProfiler(store);
+            netLearner = new NetworkLearner(store);
+        }
     }
 
     // ---------------- 离线语音识别 ----------------
@@ -321,12 +304,8 @@ public class MainActivity extends Activity {
         offline.setCallback(new OfflineRecognizer.Callback() {
             @Override
             public void onPartial(final String text) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        setHint("正在听…\n" + text);
-                    }
-                });
+                // 原版没有实时字幕,只在日志里留痕(便于排障)
+                android.util.Log.i("kiki-vosk", "识别中: " + text);
             }
 
             @Override
@@ -334,8 +313,6 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        setHint("长按说话 / 点一下开始");
-                        talkArea.setBackgroundColor(TALK_IDLE);
                         onHeard(text);
                     }
                 });
@@ -346,9 +323,18 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        setHint("长按说话 / 点一下开始");
-                        talkArea.setBackgroundColor(TALK_IDLE);
+                        // "等待超时"是常态(用户还没开口)—— 不能就此停住。
+                        // 原版是**一直听着**,所以这里让循环自己再起一轮。
+                        //
+                        // 【注意】这里**不要** stop 红条:用户看到的"红条在闪"
+                        // 就是因为超时重试时把它灭了又点亮。红条只应该在
+                        // "她说话/处理中/用户已说完"时隐藏(见 onHeard)。
+                        recording = false;
                         notifyUi(message);
+                        if (!thinking) {
+                            ui.removeCallbacks(autoListen);
+                            ui.postDelayed(autoListen, 200);
+                        }
                     }
                 });
             }
@@ -391,6 +377,18 @@ public class MainActivity extends Activity {
                 // 必须有日志:之前这里是空的,导致"TTS 到底成没成"完全看不出来
                 // (实测用户手机的 tts_default_synth 是 null,引擎根本没得用)。
                 android.util.Log.i("kiki-tts", "TTS 初始化: 可用=" + ok + " 支持中文=" + chinese);
+
+                // TTS 就绪 -> 念开场白 -> 念完自动开始听(对话循环的起点)
+                if (!greetSpoken && pendingGreeting != null) {
+                    greetSpoken = true;
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            android.util.Log.i("kiki-loop", "TTS 就绪,开始念开场白");
+                            speakThenListen(pendingGreeting);
+                        }
+                    });
+                }
                 if (!ok) {
                     runOnUiThread(new Runnable() {
                         @Override
@@ -413,34 +411,85 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 识别到一句话之后:走完整的自我进化闭环。
-     * 异步:因为中间可能上网搜,不能阻塞界面。
+     * 识别到一句话之后:停红条 -> 思考 -> 回答 -> **再自动开始听**。
+     *
+     * 【踩坑记录】这里曾经留着一份旧实现(只 addMessage + replyAsync + speak),
+     * 没有重新开听 —— 表现为"第一轮正常,她答完就再也不听了"。
+     * 原因是早先一次脚本删方法时删错了对象(删掉新版、留下旧版)。
+     * 现在把整段替换为正确实现,并加日志便于回归。
      */
     private void onHeard(String text) {
-        // 拼音纠错曾经接过,但实测无效(详见 INSTALL.md):
-        // "水灾一百舒适度都沸腾" 与 "水在一百摄氏度沸腾" 的拼音相似度只有 0.50,
-        // 达不到安全阈值;而把阈值降到 0.6 又会把 "北京是谁的首都" 误纠成
-        // "北京是中国的首都"。所以不启用,避免帮倒忙。
+        android.util.Log.i("kiki-loop", "onHeard: " + text);
+        recording = false;
+        // 【用户最终确认】"红条是在识别时消失" ——
+        // 所以收到识别结果、进入思考/回答阶段时隐藏它。
+        if (listenBar != null) listenBar.stop();
+        thinking = true;
         addMessage("你", text);
+
+        // 特性 2:观察这句,更新"她眼里的你"(说话风格/提问习惯/常聊话题)
+        if (prefProfiler != null) {
+            try { prefProfiler.observe(text); } catch (Throwable ignored) {}
+        }
+
         if (brain == null) {
             Answer a = bot.reply(text);
             addMessage("kiki", a.text);
-            if (speech != null) speech.speak(a.text);
+            thinking = false;
+            speakThenListen(a.text);
             return;
         }
-        setHint("思考中…");
-        brain.replyAsync(text, new ChatBrain.ReplyCallback() {
+
+        brain.replyAsync(text, new KikiBrain.Callback() {
             @Override
             public void onReply(final Answer answer, final String learnedFrom) {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        setHint("长按说话 / 点一下开始");
-                        if (learnedFrom != null) {
-                            notifyUi("刚" + learnedFrom + "学了新东西,已存入本地");
+                        thinking = false;
+                        // 特性 2:按"她眼里的你"调整措辞
+                        // 必须是 final —— 下面的匿名 Callback 会捕获它
+                        String adapted = answer.text;
+                        if (prefProfiler != null) {
+                            try { adapted = prefProfiler.adapt(adapted); } catch (Throwable ignored) {}
                         }
-                        addMessage("kiki", answer.text);
-                        if (speech != null) speech.speak(answer.text);
+                        final String out = adapted;
+                        // 特性 2:本地不懂 -> 先联网学一次,学到就直接答
+                        if (shouldTryNet(answer)) {
+                            final String subj = netSubject(answer.text);
+                            if (subj != null && netLearner != null) {
+                                android.util.Log.i("kiki-loop", "本地不懂,尝试联网学: " + subj);
+                                netLearner.learnAsync(subj, new NetworkLearner.Callback() {
+                                    @Override
+                                    public void onLearned(final NetworkLearner.Result r) {
+                                        runOnUiThread(new Runnable() {
+                                            @Override
+                                            public void run() {
+                                                if (r.ok && r.factCount > 0 && r.summary != null) {
+                                                    // 学到了:直接用网络学到的内容回答
+                                                    String learned = r.summary;
+                                                    addMessage("kiki", learned);
+                                                    speakThenListen(learned);
+                                                } else {
+                                                    // 【用户要求】联网也没查到 -> **不要反问**,
+                                                    // 直接说"我查不到",把主动权交回用户
+                                                    // (她想教就教,不想教也不会被她追着问)。
+                                                    // 这和特性 1 的"反问"不冲突:那条路径是
+                                                    // 她没去查、当场不懂时用的;这里是"查过了,确实没有"。
+                                                    String miss = "我查不到「" + subj + "」，你教教我好不好？";
+                                                    addMessage("kiki", miss);
+                                                    speakThenListen(miss);
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                                return;
+                            }
+                        }
+                        addMessage("kiki", out);
+                        // 念完自动回到"听" —— 原版全程不需要用户操作
+                        speakThenListen(out);
                     }
                 });
             }
@@ -448,15 +497,36 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 底部说话区的提示文字 —— **按用户要求不再显示**。
+     * 这条回答是"我不懂"类的话术吗 —— 是的话就值得联网试一次。
      *
-     * 原本空闲时显示"长按说话 / 点一下开始",录音时显示"● 正在录音…"。
-     * 用户希望界面干净(进来只看到她的招呼),所以这里改成空实现:
-     * 调用点全部保留(便于将来想恢复时只改这一处),但不再影响界面。
-     * 录音状态仍可通过说话区**变绿**看出来。
+     * 两个条件必须同时满足:
+     *   1. 她在说"我不知道…/我不知道 X 是谁";
+     *   2. 从这句话里**能抽出要查的主语** —— 抽不出(比如通用话术
+     *      "唔…这个我暂时不知道")就没有可查的对象,联网也是白费,
+     *      那种情况保持她原来的反问。
      */
-    private void setHint(String s) {
-        // 刻意留空:不显示任何提示文字
+    private boolean shouldTryNet(Answer a) {
+        if (a == null || netLearner == null) return false;
+        String t = a.text == null ? "" : a.text;
+        boolean soundsUnknown = t.contains("我不知道") || t.contains("我还不知道");
+        if (!soundsUnknown) return false;
+        return netSubject(t) != null;
+    }
+
+    /** 从"我不知道，X是谁？"里取回 X,用于联网查询 */
+    private String netSubject(String t) {
+        if (t == null) return null;
+        int i = t.indexOf('，');
+        if (i < 0) i = t.indexOf(',');
+        String sub = (i >= 0 ? t.substring(i + 1) : t).trim();
+        for (String tail : new String[]{"是谁？", "是谁?", "是什么？", "是什么?"}) {
+            if (sub.endsWith(tail)) {
+                sub = sub.substring(0, sub.length() - tail.length());
+                break;
+            }
+        }
+        sub = sub.replace("？", "").replace("?", "").trim();
+        return (sub.isEmpty() || sub.length() > 12) ? null : sub;
     }
 
     // ---------------- 消息渲染:整行条纹 ----------------
@@ -477,50 +547,54 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 渲染一整行 —— 还原原版那条"一长条":
-     *   整行满宽 + **半透明**蓝白交替条纹(背景图透出来);AI 靠左、用户靠右。
+     * 渲染一条消息 —— 还原原版的"满宽横带"。
+     *
+     * 依据(docs/原版界面与交互规格.md,用户逐项确认):
+     *   - 整个对话区**铺满交替色横带**(斑马纹),文字直接压在带上
+     *   - 横带**随对话一起滚动**(所以它属于消息列表,不是固定背景)
+     *   - 带上的字**都是深色**
+     *   - 她的话靠左,用户的话靠右
+     *   - 长文本换行后**仍是同一条**(同色连成一片)
      */
     private void renderRow(String who, String text) {
         if (messages == null) return;
         boolean isKiki = "kiki".equals(who);
         boolean isUser = "你".equals(who);
+        String body = text == null ? "" : text;
+
+        // 斑马纹:按"内容条"计数交替(系统提示不占条纹序号)
+        int stripe = (isKiki || isUser) ? (rowIndex++ % 2) : (rowIndex % 2);
 
         TextView tv = new TextView(this);
-        tv.setText(text);
-        // 字号:原版聊天区字不小,21sp
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, isKiki || isUser ? 21 : 15);
-        // 上下留白加大,让每条消息更"高"、更透气(原版行高就比较宽松)
+        tv.setText(body);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);   // 用户要求"文字更大一点"
+        // 行高:**完全由内容决定**(wrap_content),不再写死、也不再事后改。
+        // 上下留白让每条消息更透气,相邻消息深浅交替,自然形成斑马纹。
         tv.setPadding(dp(14), dp(18), dp(14), dp(18));
 
-        // AI 回复:白色半透明(用户指定);用户提问:深色半透明,便于区分。
-        // 两者都是半透明,所以背景图会透出来;文字用阴影保证可读性。
+        // 条纹用**每行自己的背景**实现(原版观感,也是用户确认过的那版做法):
+        //   她的话 -> stripe_a(浅蓝白,配深色字)
+        //   你的话 -> stripe_b(中蓝,  配白色字)
+        // 两者都半透明,所以底下背景插画会透出来。
+        //
+        // 【为什么放弃"整屏画条纹"】
+        // 试过三种整屏方案,都栽在同一处:消息高度是变的(1 行 / 3 行),
+        // 整屏条纹的带心对不上变高的行,于是要么文字偏、要么行与行重叠。
+        // 让**每行自带条纹**最稳:文字永远在自己那块的中间,行高再由内容决定。
         boolean isAi = isKiki;
         tv.setBackgroundResource(isAi ? R.drawable.stripe_a : R.drawable.stripe_b);
         if (isAi) {
-            // 白底 → 深色字,不需要阴影
-            tv.setTextColor(Color.parseColor("#10243C"));
+            tv.setTextColor(Color.parseColor("#10243C"));   // 浅底 -> 深字
             tv.setShadowLayer(0f, 0f, 0f, 0);
         } else {
-            // 深底 → 白字 + 阴影
-            tv.setTextColor(Color.parseColor("#FFFFFF"));
+            tv.setTextColor(Color.parseColor("#FFFFFF"));   // 深底 -> 白字
             tv.setShadowLayer(4f, 1f, 1f, Color.parseColor("#CC000000"));
         }
 
-        // AI 靠左、用户靠右(原版用对齐区分,而不是气泡)
-        if (isKiki) {
-            tv.setGravity(Gravity.LEFT);
-            rowIndex++;
-        } else if (isUser) {
-            tv.setGravity(Gravity.RIGHT);
-            rowIndex++;
-        } else {
-            // 系统提示:保持半透明深色,居中、小字
-            tv.setBackgroundResource(R.drawable.stripe_b);
-            tv.setGravity(Gravity.CENTER);
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-            tv.setTextColor(Color.parseColor("#E0E0E0"));
-            tv.setPadding(dp(14), dp(10), dp(14), dp(10));
-        }
+        // 水平:她靠左、用户靠右(原版用对齐区分,不用气泡)
+        tv.setGravity(isUser ? Gravity.RIGHT : Gravity.LEFT);
+
+        tv.setTag(isUser ? "user" : "ai");
 
         tv.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -532,7 +606,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_MIC) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startRecording();
+                beginListening();
             } else {
                 Toast.makeText(this, "没有麦克风权限,没法语音聊天", Toast.LENGTH_SHORT).show();
             }

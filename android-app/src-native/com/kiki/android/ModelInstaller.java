@@ -3,197 +3,197 @@ package com.kiki.android;
 import android.content.Context;
 import android.util.Log;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.io.InputStreamReader;
 
 /**
- * 离线语音模型的位置解析、首次解压与自检。
+ * 把 sherpa-onnx 的 Paraformer 模型从 assets 释放到私有目录。
  *
- * 模型**打进 APK 的 assets**(`assets/model-cn.zip`,约 42MB),
- * 首次启动时解压到应用私有目录,之后直接用。这样用户不需要手动推模型,
- * 代价是安装包变大(3.3MB → 约 46MB)—— 这是刻意的取舍。
+ * 为什么必须释放到磁盘
+ * --------------------
+ * aapt2 会把超过 1MB 的 asset **压缩**打包(213MB 的 onnx 必然被压)。
+ * 而 ONNX Runtime 需要**内存映射**才能高效加载这个文件,
+ * 压缩存放的 asset 没法直接 mmap。
+ * 所以沿用已验证过的做法:首次启动释放到私有目录,之后按路径加载。
  *
- * 解压目标:`<应用私有目录>/model/vosk-model-small-cn-0.22/`
- * 模型必需结构(缺一不可):
- *     am/final.mdl        声学模型
- *     conf/mfcc.conf      特征配置
- *     解码图(两种布局任一):
- *         graph/HCLG.fst                合并式
- *         graph/Gr.fst + graph/HCLr.fst 分离式(官方 small-cn 用的是这个)
+ * ============================================================
+ * 【模型指纹】为什么需要它
+ * ============================================================
+ * 最早的版本只检查"文件在不在"。后来把单语中文模型换成**双语 zh-en 模型**
+ * (原版能力清单里有"中英文混合分辨")时踩了坑:
+ * 文件名没变,旧的 213MB 模型一直躺在私有目录里,
+ * isValid() 一看文件在就复用了 —— **新模型永远释放不出来**,
+ * 表现是"代码改了、APK 也换了,识别行为却一点没变"。
+ *
+ * 现在 assets 里多放一个 model.id(由模型内容算出的指纹),
+ * 释放时一并写入 .model.id;启动时比对:
+ *   不一致 -> 删掉旧模型,重新释放
+ * 这样就保证"换了模型一定会生效"。
  */
 public class ModelInstaller {
 
-    private static final String TAG = "kiki-vosk";
-    private static final String DIR_NAME = "vosk-model-small-cn-0.22";
-    /** APK assets 里的模型压缩包 */
-    private static final String ASSET_ZIP = "model-cn.zip";
+    private static final String TAG = "kiki-asr";
+
+    /** assets 下的目录 */
+    private static final String ASSET_DIR = "asr";
+    /** 释放到 files/model-paraformer/ */
+    private static final String OUT_DIR = "model-paraformer";
+    /** 需要的模型文件 */
+    private static final String[] FILES = {"model.int8.onnx", "tokens.txt"};
+    /** 模型指纹(内容标识),用于判断是否需要重新释放 */
+    private static final String ID_ASSET = "model.id";
+    private static final String ID_LOCAL = ".model.id";
 
     /**
-     * 必需文件(相对模型根目录)。
-     *
-     * 注意:解码图有两种常见布局,必须都接受 ——
-     *   a) 合并式:graph/HCLG.fst
-     *   b) 分离式:graph/Gr.fst + graph/HCLr.fst
-     * 实测官方 vosk-model-small-cn-0.22 用的是 (b),一开始我只校验 HCLG.fst,
-     * 结果把好模型判成了"缺文件"。
-     */
-    private static final String[] REQUIRED_ALWAYS = {
-            "am/final.mdl",
-            "conf/mfcc.conf",
-    };
-    private static final String[][] GRAPH_ALTERNATIVES = {
-            {"graph/HCLG.fst"},
-            {"graph/Gr.fst", "graph/HCLr.fst"},
-    };
-
-    /**
-     * 找到可用的模型:先看已解压的,再尝试从 assets 解压一次。
-     * 返回 null 表示不可用(用 describeProblem 拿到原因)。
+     * 找到可用的模型目录;没有或**版本不符**就从 assets 重新释放。
+     * 返回 null 表示不可用(用 {@link #describeProblem} 取原因)。
      */
     public static File find(Context context) {
-        // 1. 已经解压过(或之前用 adb 推过)的
-        File internal = new File(context.getFilesDir(), "model/" + DIR_NAME);
-        if (isValid(internal)) {
-            Log.i(TAG, "使用已就绪的模型: " + internal.getAbsolutePath());
-            return internal;
+        File out = new File(context.getFilesDir(), OUT_DIR);
+        String want = readAssetId(context);
+        String have = readLocalId(out);
+
+        if (isValid(out) && (want == null || want.equals(have))) {
+            Log.i(TAG, "复用已释放的模型(" + have + "): " + out.getAbsolutePath());
+            return out;
         }
-
-        // 2. 之前用 adb 推到外部目录的也算数(兼容旧安装)
-        File external = new File(context.getExternalFilesDir(null), "model/" + DIR_NAME);
-        if (isValid(external)) {
-            Log.i(TAG, "使用外部目录的模型: " + external.getAbsolutePath());
-            return external;
+        if (want != null && !want.equals(have)) {
+            Log.i(TAG, "模型已更新(" + have + " -> " + want + "),重新释放");
+            clear(out);
         }
+        install(context, out, want);
+        return isValid(out) ? out : null;
+    }
 
-        // 3. 首次运行:从 assets 解压
-        File extracted = installFromAssets(context);
-        if (isValid(extracted)) return extracted;
+    /** 读出 assets 里的模型指纹;读不到返回 null */
+    private static String readAssetId(Context context) {
+        BufferedReader br = null;
+        try {
+            InputStream is = openAsset(context, ID_ASSET);
+            if (is == null) return null;
+            br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+            String line = br.readLine();
+            return (line == null) ? null : line.trim();
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try { if (br != null) br.close(); } catch (Throwable ignored) {}
+        }
+    }
 
+    /** 读本地已释放的模型指纹 */
+    private static String readLocalId(File dir) {
+        BufferedReader br = null;
+        try {
+            File f = new File(dir, ID_LOCAL);
+            if (!f.isFile()) return null;
+            br = new BufferedReader(new InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+            String line = br.readLine();
+            return (line == null) ? null : line.trim();
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try { if (br != null) br.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 删掉旧的模型文件(换模型时用) */
+    private static void clear(File dir) {
+        try {
+            File[] fs = dir.listFiles();
+            if (fs != null) {
+                for (File f : fs) {
+                    if (f.delete()) Log.i(TAG, "  已删除旧模型文件 " + f.getName());
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "清理旧模型失败: " + t);
+        }
+    }
+
+    /**
+     * 打开 assets 里的文件。
+     *
+     * 【aapt2 反斜杠坑】打包后 asset 名会变成 "asr\\model.int8.onnx"
+     * (目录分隔符是**反斜杠**),用正斜杠 open 会 FileNotFoundException。
+     * 实测:APK 里条目名就是 assets/asr\model.int8.onnx。
+     * 所以两种写法都试一遍,哪种能开用哪种。
+     */
+    private static InputStream openAsset(Context context, String name) {
+        String[] cands = {ASSET_DIR + "/" + name, ASSET_DIR + "\\" + name, name};
+        for (String cand : cands) {
+            try {
+                InputStream is = context.getAssets().open(cand);
+                Log.i(TAG, "  用路径打开成功: " + cand);
+                return is;
+            } catch (Throwable ignored) {
+            }
+        }
+        Log.e(TAG, "asset 打不开: " + name + " (试过 " + java.util.Arrays.toString(cands) + ")");
         return null;
     }
 
-    /**
-     * 把 assets/model-cn.zip 解压到私有目录。
-     * zip 里的顶层目录名是 vosk-model-small-cn-0.22,解到 model/ 下即得到
-     * model/vosk-model-small-cn-0.22/... —— 与 DIR_NAME 一致。
-     */
-    private static File installFromAssets(Context context) {
-        File outRoot = new File(context.getFilesDir(), "model");
-        ZipInputStream zis = null;
-        InputStream is = null;
-        try {
-            long t0 = System.currentTimeMillis();
-            Log.i(TAG, "首次运行:开始从 assets 解压语音模型…");
-            is = context.getAssets().open(ASSET_ZIP);
-            zis = new ZipInputStream(is);
-            byte[] buf = new byte[65536];
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                // 关键:zip 条目名可能是 Windows 风格的反斜杠(用 .NET 的
-                // CreateFromDirectory 造包时就是 `vosk-model-small-cn-0.22\am\final.mdl`)。
-                // ZipInputStream 不保证把 `\` 规范化成 `/`,不处理的话会解出
-                // 字面量文件名 `am\final.mdl`,自检必然失败、每次都重新解压。
-                String name = entry.getName().replace('\\', '/');
-                // 防目录穿越:拒绝绝对路径与 ..
-                if (name.contains("..") || name.startsWith("/")) {
-                    Log.w(TAG, "跳过可疑条目: " + name);
-                    continue;
-                }
-                File target = new File(outRoot, name);
-                if (entry.isDirectory() || name.endsWith("/")) {
-                    target.mkdirs();
-                    continue;
-                }
-                File parent = target.getParentFile();
-                if (parent != null && !parent.exists()) parent.mkdirs();
-                FileOutputStream fos = null;
-                try {
-                    fos = new FileOutputStream(target);
-                    int n;
-                    while ((n = zis.read(buf)) > 0) fos.write(buf, 0, n);
-                } finally {
-                    if (fos != null) {
-                        try {
-                            fos.close();
-                        } catch (Throwable ignored) {
-                        }
-                    }
-                }
-                zis.closeEntry();
-            }
-            Log.i(TAG, "模型解压完成,耗时 " + (System.currentTimeMillis() - t0) + " ms");
-            return new File(outRoot, DIR_NAME);
-        } catch (Throwable t) {
-            Log.e(TAG, "从 assets 解压模型失败: " + t);
-            return null;
-        } finally {
-            try {
-                if (zis != null) zis.close();
-            } catch (Throwable ignored) {
-            }
-            try {
-                if (is != null) is.close();
-            } catch (Throwable ignored) {
-            }
-        }
-    }
-
-    /** 判断一个目录是否是完整的模型 */
+    /** 模型文件都在且非空才算有效 */
     public static boolean isValid(File dir) {
         if (dir == null || !dir.isDirectory()) return false;
-        for (String rel : REQUIRED_ALWAYS) {
-            if (!new File(dir, rel).isFile()) return false;
+        for (String f : FILES) {
+            File x = new File(dir, f);
+            if (!x.isFile() || x.length() < 1024) return false;
         }
-        // 解码图:任一种布局成立即可
-        for (String[] alt : GRAPH_ALTERNATIVES) {
-            boolean all = true;
-            for (String rel : alt) {
-                if (!new File(dir, rel).isFile()) {
-                    all = false;
-                    break;
-                }
-            }
-            if (all) return true;
-        }
-        return false;
+        return true;
     }
 
-    /** 出问题时的提示(模型已内置在 APK,所以这里只报告解压/自检失败) */
-    public static String describeProblem(Context context) {
-        File d = new File(context.getFilesDir(), "model/" + DIR_NAME);
-        StringBuilder sb = new StringBuilder();
-        sb.append("离线语音模型不可用(应从 APK 内置资源自动解压)。期望位置: ")
-                .append(d.getAbsolutePath());
-        sb.append(" 需要的文件: am/final.mdl, conf/mfcc.conf, 以及解码图 ")
-                .append("(graph/HCLG.fst 或 graph/Gr.fst+graph/HCLr.fst)");
-        if (d.isDirectory()) {
-            sb.append(" 该目录存在,但缺少: ");
-            for (String rel : REQUIRED_ALWAYS) {
-                if (!new File(d, rel).isFile()) sb.append(rel).append(" ");
+    /** 从 assets/asr/ 释放到私有目录 */
+    private static void install(Context context, File out, String id) {
+        long t0 = System.currentTimeMillis();
+        try {
+            if (!out.isDirectory() && !out.mkdirs()) {
+                Log.e(TAG, "无法创建目录: " + out);
+                return;
             }
-            if (!graphOk(d)) sb.append("解码图(graph/HCLG.fst 或 Gr.fst+HCLr.fst)");
-        } else {
-            sb.append(" 目录不存在 —— 可能解压失败或存储空间不足");
+            for (String name : FILES) {
+                File dst = new File(out, name);
+                Log.i(TAG, "释放模型文件: " + name);
+                InputStream is = openAsset(context, name);
+                if (is == null) return;
+                FileOutputStream fos = new FileOutputStream(dst);
+                byte[] buf = new byte[1 << 16];
+                int n;
+                long total = 0;
+                while ((n = is.read(buf)) > 0) {
+                    fos.write(buf, 0, n);
+                    total += n;
+                }
+                fos.close();
+                is.close();
+                Log.i(TAG, "  " + name + " -> " + (total / 1048576) + " MB");
+            }
+            // 写指纹:下次启动靠它判断要不要重新释放
+            if (id != null) {
+                FileOutputStream fo = new FileOutputStream(new File(out, ID_LOCAL));
+                fo.write((id + "\n").getBytes("UTF-8"));
+                fo.close();
+                Log.i(TAG, "  指纹已写入: " + id);
+            }
+            Log.i(TAG, "模型释放完成,耗时 " + (System.currentTimeMillis() - t0) + " ms");
+        } catch (Throwable e) {
+            Log.e(TAG, "释放模型失败: " + e);
         }
+    }
+
+    /** 不可用时给出一句可读的原因 */
+    public static String describeProblem(Context context) {
+        File out = new File(context.getFilesDir(), OUT_DIR);
+        StringBuilder sb = new StringBuilder("语音模型不可用:");
+        for (String f : FILES) {
+            File x = new File(out, f);
+            sb.append(" ").append(f).append("=")
+              .append(x.isFile() ? (x.length() / 1048576 + "MB") : "缺失");
+        }
+        sb.append(" id=").append(readLocalId(out));
         return sb.toString();
     }
-
-    /** 解码图是否齐全(两种布局任一) */
-    private static boolean graphOk(File d) {
-        for (String[] alt : GRAPH_ALTERNATIVES) {
-            boolean all = true;
-            for (String rel : alt) {
-                if (!new File(d, rel).isFile()) {
-                    all = false;
-                    break;
-                }
-            }
-            if (all) return true;
-        }
-        return false;
-    }
 }
-

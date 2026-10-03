@@ -25,17 +25,16 @@ $jdk       = "$tools\jdk21"
 $buildTools= "$sdk\build-tools\35.0.0"
 $androidJar= "$sdk\platforms\android-35\android.jar"
 
-# ---- 离线语音识别(Vosk)所需:JNA + Vosk 的 classes.jar 与原生库 ----
-$voskDir   = "$tools\vosk"
-$voskJar   = "$voskDir\aar\classes.jar"          # org.vosk.* 的 Java API
-$jnaJar    = "$voskDir\jna-aar\classes.jar"      # com.sun.jna.* (Vosk 依赖它)
-$voskSoDir = "$voskDir\aar\jni\arm64-v8a"       # libvosk.so
-$jnaSoDir  = "$voskDir\jna-aar\jni\arm64-v8a"   # libjnidispatch.so
+# ---- 离线语音识别(sherpa-onnx + Paraformer)所需 ----
+# sherpa-onnx 的 Java API 是 Kotlin 写的,而它的 classes.jar 里**不含** kotlin/*,
+# 所以必须另外提供 kotlin-stdlib,否则运行时报 NoClassDefFoundError: kotlin/jvm/internal/Intrinsics
+$sherpaDir = "$tools\sherpa-asr"
+$sherpaJar = "$sherpaDir\aar\classes.jar"        # com.k2fsa.sherpa.onnx.*
+$kotlinJar = "$sherpaDir\kotlin-stdlib.jar"       # kotlin.*
+$sherpaSo  = "$sherpaDir\aar\jni\arm64-v8a"     # libsherpa-onnx-*.so + libonnxruntime.so
+# 说明:sherpa-onnx **自带** libonnxruntime.so,所以不再需要独立的 onnxruntime AAR
 
-# ---- 本地对话模型(ONNX Runtime)----
-$ortDir    = "$tools\onnxruntime\aar"
-$ortJar    = "$ortDir\classes.jar"                # ai.onnxruntime.*
-$ortSoDir  = "$ortDir\jni\arm64-v8a"             # libonnxruntime*.so
+# ---- (ONNX Runtime 不再单独需要:已并入 sherpa-onnx 的原生库) ----
 
 # d8.bat / apksigner.bat 这些批处理会去读 JAVA_HOME,而 javac 用的是绝对路径,
 # 所以必须显式设好,否则 d8 会报 "JAVA_HOME is not set"。
@@ -70,12 +69,10 @@ Check "$buildTools\zipalign.exe" 'zipalign'
 Check "$buildTools\apksigner.bat" 'apksigner'
 Check $androidJar               'android.jar'
 Check $manifest                 'AndroidManifest.xml'
-Check $voskJar                  'Vosk classes.jar'
-Check $jnaJar                   'JNA classes.jar'
-Check "$voskSoDir\libvosk.so"   'libvosk.so'
-Check "$jnaSoDir\libjnidispatch.so" 'libjnidispatch.so'
-Check $ortJar                  'ONNX Runtime classes.jar'
-Check "$ortSoDir\libonnxruntime.so" 'libonnxruntime.so'
+Check $sherpaJar                'sherpa-onnx classes.jar'
+Check $kotlinJar                'kotlin-stdlib.jar'
+Check "$sherpaSo\libsherpa-onnx-jni.so" 'libsherpa-onnx-jni.so'
+Check "$sherpaSo\libonnxruntime.so"     'libonnxruntime.so'
 Write-Host "    JDK        : $((cmd /c "`"$jdk\bin\java.exe`" -version 2>&1" | Select-Object -First 1))"
 Write-Host "    build-tools: $buildTools"
 Write-Host "    android.jar: $androidJar"
@@ -129,7 +126,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     -nowarn `
     -source 8 -target 8 `
     -bootclasspath $androidJar `
-    -classpath "$androidJar;$voskJar;$jnaJar;$ortJar" `
+    -classpath "$androidJar;$sherpaJar;$kotlinJar" `
     -d $classesDir `
     "@$srcListFile"
 if ($LASTEXITCODE -ne 0) { throw "javac 编译失败(看上面的错误)" }
@@ -139,11 +136,11 @@ Write-Host "    编译完成"
 Step "d8 生成 dex"
 $classFiles = Get-ChildItem $classesDir -Recurse -Filter *.class | ForEach-Object { $_.FullName }
 if ($classFiles.Count -eq 0) { throw "没有生成 .class" }
-# 注意:Vosk/JNA 的 classes.jar 必须作为**输入**交给 d8(不能只放 --classpath),
+# 注意:sherpa-onnx / kotlin-stdlib 的 jar 必须作为**输入**交给 d8(不能只放 --classpath),
 # 否则它们的类不会进 dex —— 运行时就是 NoClassDefFoundError: Lorg/vosk/Model;
 # 一开始我就是这么错的。--lib 仍然只给平台类。
 # 不含 libjnidispatch.so 的 .jar 里没有原生库,d8 只处理 .class,安全。
-& "$buildTools\d8.bat" --lib $androidJar --min-api 24 --output $dexDir $classFiles $voskJar $jnaJar $ortJar
+& "$buildTools\d8.bat" --lib $androidJar --min-api 24 --output $dexDir $classFiles $sherpaJar $kotlinJar
 if ($LASTEXITCODE -ne 0) { throw "d8 失败" }
 Check "$dexDir\classes.dex" 'classes.dex'
 Write-Host "    classes.dex 生成完成"
@@ -161,12 +158,12 @@ try {
     [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
         $zip, "$dexDir\classes.dex", $entryName) | Out-Null
 
-    # 离线识别引擎的原生库(Vosk + JNA),放进 lib/arm64-v8a/
+    # 离线识别引擎的原生库(sherpa-onnx + 它自带的 onnxruntime),放进 lib/arm64-v8a/
     foreach ($so in @(
-        @{ src = "$voskSoDir\libvosk.so";            name = "lib/arm64-v8a/libvosk.so" },
-        @{ src = "$jnaSoDir\libjnidispatch.so";      name = "lib/arm64-v8a/libjnidispatch.so" },
-        @{ src = "$ortSoDir\libonnxruntime.so";       name = "lib/arm64-v8a/libonnxruntime.so" },
-        @{ src = "$ortSoDir\libonnxruntime4j_jni.so"; name = "lib/arm64-v8a/libonnxruntime4j_jni.so" }
+        @{ src = "$sherpaSo\libsherpa-onnx-jni.so";     name = "lib/arm64-v8a/libsherpa-onnx-jni.so" },
+        @{ src = "$sherpaSo\libsherpa-onnx-c-api.so";   name = "lib/arm64-v8a/libsherpa-onnx-c-api.so" },
+        @{ src = "$sherpaSo\libsherpa-onnx-cxx-api.so"; name = "lib/arm64-v8a/libsherpa-onnx-cxx-api.so" },
+        @{ src = "$sherpaSo\libonnxruntime.so";         name = "lib/arm64-v8a/libonnxruntime.so" }
     )) {
         if (Test-Path $so.src) {
             $old = $zip.Entries | Where-Object { $_.FullName -eq $so.name }

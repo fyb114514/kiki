@@ -58,6 +58,12 @@ public class SpeechManager {
     public volatile String lastError = "";
 
     /**
+     * "念完了"回调 —— 原版是"她说完就自动开始听",所以必须知道 TTS 何时结束。
+     * TTS 不可用时(没装引擎),调用方会走超时兜底,不会卡住对话循环。
+     */
+    public Runnable onSpeakDone;
+
+    /**
      * 已报过的错误(去重)。
      * 实测:识别流程正常拿到结果后,系统仍可能再补一发 ERROR_CLIENT/onError,
      * 而 startListening 的 catch 分支也可能同时报错 —— 于是界面上出现两次同样的提示。
@@ -142,6 +148,26 @@ public class SpeechManager {
             return;
         }
         try {
+            final Runnable done = onSpeakDone;
+            if (done != null) {
+                tts.setOnUtteranceProgressListener(new android.speech.tts.UtteranceProgressListener() {
+                    @Override
+                    public void onStart(String utteranceId) {
+                    }
+
+                    @Override
+                    public void onDone(String utteranceId) {
+                        android.util.Log.i("kiki-loop", "TTS onDone 触发");
+                        done.run();
+                    }
+
+                    @Override
+                    public void onError(String utteranceId) {
+                        android.util.Log.w("kiki-loop", "TTS onError 触发");
+                        done.run();
+                    }
+                });
+            }
             int r = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "kiki");
             android.util.Log.i(TAG, "朗读(" + r + "): " + text);
         } catch (Exception e) {

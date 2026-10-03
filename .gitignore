@@ -60,6 +60,15 @@ android-app/app/src/main/assets/llm/model.onnx
 android-app/app/src/main/assets/model-cn.zip
 android-app/app/src/main/assets/*.onnx
 
+# 语音识别模型(Paraformer,213 MB)—— 超过 GitHub 单文件 100 MB 上限,
+# 所以不进仓库,作为 Release 附件分发。
+# 注意:上面那条 assets/*.onnx 只匹配 assets 这一层,匹配不到 asr/ 子目录,
+# 所以这里必须显式再加一条(第一版就是漏了这个,`git status` 里才会冒出 213 MB 的未跟踪文件)。
+android-app/app/src/main/assets/asr/*.onnx
+android-app/app/src/main/assets/asr/*.txt
+# model.id 是模型的**内容指纹**,只有几十字节,反而应该进仓库 ——
+# 换模型时靠它让已安装的 App 知道要重新释放新模型。
+
 # --- 密钥/凭据 ---
 *.keystore
 *.jks

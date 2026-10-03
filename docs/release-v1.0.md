@@ -4,7 +4,7 @@
 
 ## 下载
 
-见下方 **Assets** 里的 `MarisaKiki.apk`（429 MB）。
+见下方 **Assets** 里的 `kiki-v1.0.apk`（429 MB）。
 
 ## 功能
 
@@ -71,8 +71,9 @@
 ## 校验
 
 ```
-SHA256: 1539CD0739AF4E9D0D585340CA68E4275AC2647B10E96AF41B70B50FEA93483B
-大小:   429.1 MB (449,940,118 字节)
+SHA256: C9A619014D1E8D83042000A5D5C57FCD8E9FACCAFD2EEBBCA750262DCEFFC228
+大小:   429.1 MB (449,940,114 字节)
+包名:   com.kiki.android
 ```
 
 ## 许可

@@ -6,14 +6,17 @@ import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.util.Log;
 
-import org.vosk.Model;
-import org.vosk.Recognizer;
+import com.k2fsa.sherpa.onnx.FeatureConfig;
+import com.k2fsa.sherpa.onnx.OfflineModelConfig;
+import com.k2fsa.sherpa.onnx.OfflineParaformerModelConfig;
+import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig;
+import com.k2fsa.sherpa.onnx.OfflineStream;
 
 import java.io.File;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 真正离线的中文语音识别(Vosk + 本地模型)。
+ * 真正离线的**中英混合**语音识别(sherpa-onnx + Paraformer zh-en 本地模型)。
  *
  * 为什么必须自己做
  * ----------------
@@ -27,13 +30,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * 实现要点
  * --------
- * - 自己开 AudioRecord(16kHz 单声道 PCM16),把音频喂给 Vosk 的 Recognizer
+ * - 自己开 AudioRecord(16kHz 单声道 PCM16),把音频喂给 sherpa-onnx 的 OfflineStream
  * - 用 RMS 能量做"说完了"判定,静音 1.5 秒就收尾,不需要用户再按一次
  * - 全程在后台线程,主线程只收回调
  */
 public class OfflineRecognizer {
 
-    private static final String TAG = "kiki-vosk";
+    private static final String TAG = "kiki-asr";   // renamed after engine swap
 
     public interface Callback {
         /** 实时中间结果(说话过程中不断刷新) */
@@ -47,8 +50,16 @@ public class OfflineRecognizer {
     }
 
     private final Context context;
-    private Model model;
-    private Recognizer recognizer;
+    /** sherpa-onnx recognizer (Paraformer, Chinese) */
+    private com.k2fsa.sherpa.onnx.OfflineRecognizer recognizer;
+    /** audio stream for the current recording */
+    private OfflineStream stream;
+    /**
+     * PCM accumulated during this recording (16k mono float).
+     * Paraformer is a WHOLE-UTTERANCE model: decoding incrementally loses
+     * context, so we accumulate and decode once at the end.
+     */
+    private final java.util.ArrayList<Float> pcmBuf = new java.util.ArrayList<Float>();
     private AudioRecord record;
     private Thread thread;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -58,11 +69,44 @@ public class OfflineRecognizer {
     /** 采样率:Vosk 中文模型要求 16kHz */
     private static final int SAMPLE_RATE = 16000;
     /** 静音多久算说完(毫秒) */
-    private static final int SILENCE_MS = 2800;
+    /**
+     * 用户**说完之后**多久算说完。
+     *
+     * 【调参记录】原来是 2800ms,用户反馈"要完全安静后才会停止" ——
+     * 因为正常说话中间的换气停顿往往不到 1 秒,而 2.8 秒太长,
+     * 于是必须等环境彻底安静才收尾。改成 1000ms:正常停顿即收尾。
+     */
+    private static final int SILENCE_MS = 1000;
     /** 静音判定阈值下限(RMS);实际门槛取 max(它, 底噪×2) */
-    private static final double SILENCE_RMS = 500.0;
+    /**
+     * 判定"这一帧有语音"的音量下限(RMS)。
+     *
+     * 【调参记录】原来 500,偏高:说话音量略小、或字头字尾(擦音、轻声)能量低,
+     * 会被判成静音 —— 表现为**句子被从中间切断**,识别自然不准。
+     * 降到 280 后,低能量音节也能进入识别;环境噪声的抑制由
+     * "底噪估算 + 滑动窗口比例"共同负责(见循环里的 gate 计算)。
+     */
+    private static final double SILENCE_RMS = 280.0;
+
+    /** 语音门限的绝对下限:必须高于安静环境的底噪(实测约 255),否则噪音被当说话 */
+    private static final double GATE_MIN = 620.0;
+    /** 门限相对底噪的倍数:说话会让能量明显抬升 */
+    private static final double GATE_RATIO = 2.6;
+    /** 门限上限:嘈杂环境不至于高到听不见人声 */
+    private static final double GATE_MAX = 2500.0;
     /** 底噪校准帧数(每帧约 4096/16000 ≈ 0.26 秒) */
     private static final int CALIB_FRAMES = 6;
+
+    /**
+     * "还没等到用户开口"的最长等待时间。
+     *
+     * 与 SILENCE_MS 的区别很重要:
+     *   SILENCE_MS   = 用户**说完之后**多久算说完(2.8 秒)
+     *   WAIT_FIRST_MS = 用户**还没开口**时等多久(12 秒)
+     * 原来两者混用一个 5 秒常量,导致"两秒没说话就报没听到" ——
+     * 而原版是常驻监听,不会因为你没开口就放弃。
+     */
+    private static final long WAIT_FIRST_MS = 12000L;
 
     public OfflineRecognizer(Context context) {
         this.context = context;
@@ -77,32 +121,76 @@ public class OfflineRecognizer {
     }
 
     public boolean isReady() {
-        return model != null;
+        return recognizer != null;
     }
 
     /**
      * 加载模型。modelDir 必须是包含 am/ conf/ graph/ 等子目录的模型根目录。
      * 加载较慢(首次 1-3 秒),建议在后台线程调用。
      */
+    /**
+     * Load the Paraformer model.
+     *
+     * modelDir must contain:
+     *   model.int8.onnx   model (int8 quantized, 213MB)
+     *   tokens.txt        vocabulary
+     *
+     * Why a file path instead of AssetManager: sherpa-onnx has an
+     * AssetManager constructor, but a 213MB onnx stored compressed by aapt2
+     * cannot be memory-mapped. So we keep the proven approach: extract from
+     * assets to private storage on first run (AsrModelInstaller), then load.
+     */
     public boolean loadModel(File modelDir) {
-        if (model == null) {
-            try {
-                long t0 = System.currentTimeMillis();
-                model = new Model(modelDir.getAbsolutePath());
-                Log.i(TAG, "模型加载完成,耗时 " + (System.currentTimeMillis() - t0) + " ms: " + modelDir);
-            } catch (Throwable t) {
-                Log.e(TAG, "模型加载失败: " + t);
-                if (callback != null) callback.onError("离线语音模型加载失败: " + t.getMessage());
-                model = null;
+        if (recognizer != null) return true;
+        long t0 = System.currentTimeMillis();
+        try {
+            File m = new File(modelDir, "model.int8.onnx");
+            File t = new File(modelDir, "tokens.txt");
+            if (!m.isFile() || !t.isFile()) {
+                Log.e(TAG, "model files missing: " + m + " / " + t);
                 return false;
             }
+
+            FeatureConfig feat = new FeatureConfig();
+            feat.setSampleRate(SAMPLE_RATE);
+            feat.setFeatureDim(80);
+            feat.setDither(0f);
+
+            OfflineParaformerModelConfig para = new OfflineParaformerModelConfig();
+            para.setModel(m.getAbsolutePath());
+
+            OfflineModelConfig mc = new OfflineModelConfig();
+            mc.setParaformer(para);
+            mc.setTokens(t.getAbsolutePath());
+            mc.setNumThreads(2);
+            mc.setDebug(false);
+            mc.setProvider("cpu");
+            mc.setModelType("paraformer");
+            // 用的是**双语 zh-en** 模型(原版能力清单里的"中英文混合分辨")。
+            // 中文上与单语模型逐字一致(已实测),额外能识别英文。
+
+            OfflineRecognizerConfig rc = new OfflineRecognizerConfig();
+            rc.setFeatConfig(feat);
+            rc.setModelConfig(mc);
+            rc.setDecodingMethod("greedy_search");
+
+            // Java 侧只有 (AssetManager, Config) 这一个构造函数。
+            // 传 null:模型按**文件路径**加载(rc 里已设绝对路径),
+            // 不需要从 assets 读,所以 AssetManager 用不上。
+            recognizer = new com.k2fsa.sherpa.onnx.OfflineRecognizer(null, rc);
+            Log.i(TAG, "Paraformer loaded in " + (System.currentTimeMillis() - t0)
+                    + " ms: " + modelDir);
+            return true;
+        } catch (Throwable e) {
+            Log.e(TAG, "model load failed: " + e);
+            recognizer = null;
+            return false;
         }
-        return true;
     }
 
     /** 开始听(非阻塞)。已经忙时:**强制重置后重新开始**,绝不静默忽略。 */
     public void start() {
-        if (model == null) {
+        if (recognizer == null) {
             if (callback != null) callback.onError("离线语音模型还没准备好");
             return;
         }
@@ -135,11 +223,11 @@ public class OfflineRecognizer {
     }
 
     /** 松手后仍继续喂音频的宽限期:让 Vosk 有时间把这句话"收尾" */
-    private static final long TAIL_GRACE_MS = 500;
+    private static final long TAIL_GRACE_MS = 350;   // 收尾更快
     private volatile long stopRequestedAt = 0L;
 
     /** 单次录音的最长时间,超过就强制收尾(防止线程卡死导致后续全部失灵) */
-    private static final long MAX_RECORD_MS = 8000;
+    private static final long MAX_RECORD_MS = 20000;
     private volatile long lastStopWatchdog = 0L;
 
     /** 释放 AudioRecord(供强制复位用) */
@@ -222,8 +310,9 @@ public class OfflineRecognizer {
                 fail("录音设备初始化失败(可能被其他应用占用)");
                 return;
             }
-            recognizer = new Recognizer(model, SAMPLE_RATE);
-            recognizer.setWords(false);
+            // one recording = one stream + empty buffer
+            pcmBuf.clear();
+            stream = recognizer.createStream();
             record.startRecording();
 
             byte[] buf = new byte[4096];
@@ -291,7 +380,10 @@ public class OfflineRecognizer {
                 // 也不低于 SILENCE_RMS。
                 // 门槛上限刻意压低到 2000:实测有过一次 底噪=5135、峰值=2248,
                 // 门槛被抬到 3000 以上,小声说话全被判成静音 -> 卡 5 秒才提示。
-                gate = Math.max(SILENCE_RMS, Math.min(noiseFloor * 1.8, 2000.0));
+                // 【调参记录】原来 gate 下限跟着 SILENCE_RMS 走(我一度降到 280),
+                // 实测环境底噪就有 255 —— 噪音被当说话,判停永不触发,一路录满 20 秒。
+                // 现在下限独立为 450(明显高于安静环境底噪),并放宽跟随系数。
+                gate = Math.max(GATE_MIN, Math.min(noiseFloor * GATE_RATIO, GATE_MAX));
 
                 if (rms > peakRms) peakRms = rms;
                 boolean voiced = rms > gate;
@@ -304,16 +396,15 @@ public class OfflineRecognizer {
                 winIdx = (winIdx + 1) % WIN;
                 if (winFill < WIN) winFill++;
 
-                boolean done = recognizer.acceptWaveForm(buf, n);
-                if (done) {
-                    String t = extractText(recognizer.getResult(), "text");
-                    if (t != null && !t.isEmpty()) best = t;
-                } else {
-                    String p = extractText(recognizer.getPartialResult(), "partial");
-                    if (p != null && !p.isEmpty() && callback != null) callback.onPartial(p);
+                                // Paraformer is a WHOLE-UTTERANCE model: convert PCM16 to float
+                // and accumulate; decode once at the end (incremental decoding
+                // loses context and is worse).
+                for (int q = 0; q + 1 < n; q += 2) {
+                    short v = (short) ((buf[q] & 0xFF) | ((buf[q + 1] & 0xFF) << 8));
+                    pcmBuf.add(v / 32768.0f);
                 }
 
-                // 收尾判定:用**滑动窗口比例**,而不是"最后一次超过门槛的时间"。
+// 收尾判定:用**滑动窗口比例**,而不是"最后一次超过门槛的时间"。
                 //
                 // 为什么必须改:原来只要环境里偶尔有一声超过门槛的响动(椅子、呼吸、
                 // 空调风),就把计时器清零,于是永远到不了静音判停 —— 用户反馈
@@ -327,11 +418,13 @@ public class OfflineRecognizer {
                         break;
                     }
                 }
-                // 一直没人说话,5 秒超时
-                if (!gotAny && System.currentTimeMillis() - lastVoiceAt > 5000) {
-                    Log.w(TAG, "没听到声音: 底噪=" + (int) noiseFloor + " 门槛=" + (int) gate
+                // 一直没人说话:给一个**较长的等待窗口**(原版是常驻监听,
+                // 不会因为你两秒没开口就放弃)。这里 12 秒,超时后由上层
+                // 的自动循环再起一轮,所以效果上是"一直在等你说"。
+                if (!gotAny && System.currentTimeMillis() - lastVoiceAt > WAIT_FIRST_MS) {
+                    Log.w(TAG, "等待超时(无人说话): 底噪=" + (int) noiseFloor + " 门槛=" + (int) gate
                             + " 峰值=" + (int) peakRms);
-                    fail("没听到声音,请对着话筒说话");
+                    fail("等待超时");
                     return;
                 }
             }
@@ -344,7 +437,7 @@ public class OfflineRecognizer {
 
             // 收尾:拿最终结果
             try {
-                String fin = extractText(recognizer.getFinalResult(), "text");
+                String fin = finishDecode();
                 if (fin != null && !fin.isEmpty()) best = fin;
             } catch (Throwable ignored) {
             }
@@ -363,6 +456,28 @@ public class OfflineRecognizer {
             busy.set(false);
             Log.i(TAG, "录音线程结束,耗时 " + (System.currentTimeMillis() - startedAt)
                     + " ms,busy 已释放");
+        }
+    }
+
+    /**
+     * Hand everything recorded so far to Paraformer in one shot.
+     * Returns recognized text, or null when there is no audio / decode fails.
+     */
+    private String finishDecode() {
+        if (stream == null || recognizer == null) return null;
+        if (pcmBuf.isEmpty()) return null;
+        try {
+            float[] a = new float[pcmBuf.size()];
+            for (int i = 0; i < a.length; i++) a[i] = pcmBuf.get(i);
+            stream.acceptWaveform(a, SAMPLE_RATE);
+            recognizer.decode(stream);
+            com.k2fsa.sherpa.onnx.OfflineRecognizerResult r = recognizer.getResult(stream);
+            String txt = (r == null) ? null : r.getText();
+            Log.i(TAG, "Paraformer decoded: samples=" + a.length + " text=[" + (txt == null ? "" : txt) + "]");
+            return txt;
+        } catch (Throwable t) {
+            Log.e(TAG, "decode failed: " + t);
+            return null;
         }
     }
 
@@ -419,20 +534,32 @@ public class OfflineRecognizer {
         }
         record = null;
         try {
-            if (recognizer != null) recognizer.close();
+            // 每次录音结束只释放**这一轮的音频流**。
+            //
+            // 【重要 · 换引擎时踩过的坑】
+            // 这里原来还有一行 `recognizer = null;` —— 那是 Vosk 时代的写法:
+            // Vosk 的 Recognizer 是**每次录音新建的会话对象**,所以收尾时要置空。
+            // 但 sherpa-onnx 的 OfflineRecognizer **就是模型本身**,必须跨录音复用;
+            // 一旦在这里置空,第一轮录音结束后模型就没了,
+            // 之后每一轮 beginListening 都会报"离线语音模型还没准备好" ——
+            // 表现为"她说完就再也不听你说话了"。
+            // 所以这里**绝不能**碰 recognizer;它在 release() 里才释放。
+            if (stream != null) {
+                try { stream.release(); } catch (Throwable ignored) {}
+                stream = null;
+            }
         } catch (Throwable ignored) {
         }
-        recognizer = null;
     }
 
     public void release() {
         stop();
         cleanup();
         try {
-            if (model != null) model.close();
+            if (recognizer != null) recognizer.release();
         } catch (Throwable ignored) {
         }
-        model = null;
+        recognizer = null;
     }
 
     /** 计算一段 PCM16 的 RMS 能量 */

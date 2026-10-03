@@ -1672,6 +1672,69 @@ public class Brain {
     }
 
     /** Kotlin: bySubject.getOrPut(key) { ArrayList(2) }。 */
+    /**
+     * 运行时新增一条事实 —— 供"主动学习"使用。
+     *
+     * 为什么单独开一个方法:原来只有载入 facts.tsv 和解析教学句两条入库路径,
+     * 而对话状态机学会的东西(如"比尔盖茨 是 微软公司CEO")需要直接入图,
+     * 这样下一轮问"比尔盖茨是谁"就能查到。
+     */
+    public void addFact(String subj, String rel, String obj, String source) {
+        if (subj == null || rel == null || obj == null) return;
+        if (subj.isEmpty() || rel.isEmpty() || obj.isEmpty()) return;
+        Fact f = new Fact(subj, rel, obj, source == null ? "" : source);
+        facts.add(f);
+        getOrPutList(bySubject, f.s).add(f);
+        getOrPutList(byObject, f.o).add(f);
+        relations.add(f.rel);
+    }
+
+    /** 是否已收录该实体(出现在主语或宾语位置) */
+    /**
+     * 删除一条事实(用户否定时调用)。
+     *
+     * 事实图有三处存着它:facts 列表 + bySubject/byObject 两个索引。
+     * 只删一处会留下"幽灵知识" —— 查询时还能查到已经不成立的旧事实,
+     * 于是用户说"不是"之后她照样拿它回答(用户反馈的原话就是
+     * "我都说了不是了他还记着")。所以三处一起清。
+     */
+    public void removeFact(String subj, String rel, String obj) {
+        if (subj == null || rel == null || obj == null) return;
+        try {
+            for (int i = facts.size() - 1; i >= 0; i--) {
+                Fact f = facts.get(i);
+                if (f.s.equals(subj) && f.rel.equals(rel) && f.o.equals(obj)) {
+                    facts.remove(i);
+                }
+            }
+            drop(bySubject, subj, rel, obj, true);
+            drop(byObject, obj, rel, subj, false);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 从索引桶里摘掉一条;full 表示按 (s,rel,o) 比,否则按 (o,rel,s) 比 */
+    private static void drop(HashMap<String, List<Fact>> idx,
+                             String key, String rel, String other, boolean full) {
+        List<Fact> bucket = idx.get(key);
+        if (bucket == null) return;
+        for (int i = bucket.size() - 1; i >= 0; i--) {
+            Fact f = bucket.get(i);
+            boolean match = full
+                    ? (f.rel.equals(rel) && f.o.equals(other))
+                    : (f.rel.equals(rel) && f.s.equals(other));
+            if (match) bucket.remove(i);
+        }
+        if (bucket.isEmpty()) idx.remove(key);
+    }
+
+    public boolean hasEntity(String e) {
+        if (e == null || e.isEmpty()) return false;
+        if (bySubject.containsKey(e)) return true;
+        if (byObject.containsKey(e)) return true;
+        return false;
+    }
+
     private static List<Fact> getOrPutList(Map<String, List<Fact>> map, String key) {
         List<Fact> cur = map.get(key);
         if (cur == null) {

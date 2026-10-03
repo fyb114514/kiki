@@ -1,11 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  还原 2011 原版布局:
-    - 上方:一整条消息列表(整行满宽、半透明蓝白交替条纹)
-    - 下方:一块深灰色区域,长按说话(原版是纯语音,没有打字输入)
+  对话界面布局 —— 回到用户确认过的那版观感(ui_newS)。
 
-  背景图**直接显示、不做任何改色**:没有暗化遮罩,消息行用半透明条纹,
-  所以背景从每条消息里透出来。文字可读性靠 TextView 的阴影,不靠不透明底色。
+  结构(自上而下):
+    1. 背景插画(bg_kiki)—— 原样铺满
+    2. 对话区:每条消息**自带条纹背景**(stripe_a 浅 / stripe_b 深),
+       半透明,所以背景插画会透出来 —— 这就是"满屏斑马纹"的来源
+    3. 底部半透明灰 + 红色移动条(仅她说话时出现)
+
+  【为什么条纹放在每条消息上,而不是整屏画】
+  整屏画条纹的方案试了三次都栽在同一处:消息高度是变的(1 行 / 3 行),
+  整屏的带心对不上变高的行,结果要么文字偏、要么行与行重叠
+  (用户截图"重叠在一起了")。
+  让每行自带条纹最稳:文字永远在自己那块的中间,行高完全由内容决定。
+
+  没有输入框、没有按钮 —— 原版全程自动语音对话。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
@@ -13,15 +22,16 @@
     android:background="#102030"
     android:fitsSystemWindows="true">
 
-    <!-- 1. 背景图(直接显示,上层不再压暗化遮罩) -->
+    <!-- 1. 背景插画 -->
     <ImageView
+        android:id="@+id/backdrop"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:scaleType="centerCrop"
         android:src="@drawable/bg_kiki"
         android:contentDescription="@null" />
 
-    <!-- 2. 前景:消息条 + 说话区 -->
+    <!-- 2. 前景:对话区 + 底部听音区 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
@@ -42,23 +52,17 @@
                 android:orientation="vertical" />
         </ScrollView>
 
-        <!-- 说话区:原版下半部分那块区域,长按录音。 -->
+        <!-- 3. 底部听音区:半透明灰(背景插画透出来)+ 红色移动条 -->
         <FrameLayout
             android:id="@+id/talkArea"
             android:layout_width="match_parent"
             android:layout_height="96dp"
-            android:background="#3C3C3C">
+            android:background="#B03C3C3C">
 
-            <TextView
-                android:id="@+id/talkHint"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:gravity="center"
-                android:lineSpacingExtra="4dp"
-                android:text=""
-                android:textColor="#E8E8E8"
-                android:textSize="16sp" />
+            <com.kiki.android.ListeningBar
+                android:id="@+id/listenBar"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
         </FrameLayout>
     </LinearLayout>
 </FrameLayout>

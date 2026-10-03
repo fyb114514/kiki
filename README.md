@@ -1,213 +1,214 @@
 # kiki — 本地离线语音助手（Android）
 
-一个**完全离线运行**的中文语音助手。听你说话、陪你聊天、记住你教的东西。
-模型和语音引擎全部内置，**不需要联网，不依赖任何云服务**。
-
-[![Release](https://img.shields.io/badge/release-v1.0-blue)](https://github.com/fyb114514/kiki/releases/tag/v1.0)
+一个**完全离线运行**的中文语音助手。听你说话、陪你聊天、**遇到不懂的会主动问你**。
 
 > 本项目是对 2011 年那个同名作品 **kiki** 的一次**独立复现**。
-> 原项目从未公开发布，作者至今未知 —— 追查记录见
-> [kiki 原作者追查档案](docs/kiki原作者追查档案.md)。
+> 追查记录见 [kiki 原作者追查档案](docs/kiki原作者追查档案.md)。
+> 原版视频逐帧分析见 [原版视频分析](docs/原版视频分析.md)。
 
 ---
 
-## 下载
+## 它最特别的地方：不知道就问
 
-**[⬇ kiki-v1.0.apk（429 MB）](https://github.com/fyb114514/kiki/releases/download/v1.0/kiki-v1.0.apk)**
+这不是"问什么答什么"的问答机器人。原版最核心的能力是**主动学习闭环**：
 
 ```
-SHA256: C9A619014D1E8D83042000A5D5C57FCD8E9FACCAFD2EEBBCA750262DCEFFC228
-大小:   429.1 MB (449,940,114 字节)
-包名:   com.kiki.android
+你：为什么比尔盖茨很出名        (数据库里没有)
+她：我不知道，比尔盖茨是谁？     ← 不知道就问
+你：微软公司CEO
+她：是微软公司让比尔盖茨出名吗？ ← 追问因果
+你：没错
+她：明白了                      ← 记住
+你：比尔盖茨很出名
+她：因为他是微软公司CEO          ← 用学到的推导
 ```
 
-### 安装要求
+**这段流程不是我编的** —— 它是从 2011 年原版视频里逐帧 OCR 读出来的，
+和我实现的对话**逐句一致**（见 [原版视频分析](docs/原版视频分析.md) 第 46~92 秒）。
 
-| 要求 | 值 | 原因 |
+真机上有自动化测试覆盖（`DialogSelfTest`，**4/4 通过**）。
+预训练语言模型做不到这个 —— 它遇到不认识的东西会直接编一个答案。
+
+**如果她说了"不是"**，她会真的把那条错误知识**删掉**（内存事实图与本地数据库一起清），
+不会继续说错的。
+
+---
+
+## 四项能力（对照原版说明卡）
+
+原版视频 08 秒的说明卡列出的能力，现在全部实现：
+
+| 原版能力 | 实现 | 自检 |
 |---|---|---|
-| **CPU 架构** | **仅 arm64-v8a** | 原生库只编了 arm64 |
-| **系统版本** | Android 7.0+（API 24） | minSdk |
-| **内存** | 建议 4 GB+ | 实测峰值约 1.8 GB 原生内存 |
-| **可用存储** | 约 1.2 GB | APK 429MB + 首次释放模型 460MB + 语音模型 65MB |
+| **逻辑推理 + 主动记忆** | `KikiDialog` 状态机 + `Brain` 事实图 | 4/4 |
+| **多音字分辨** | Paraformer 中文模型 | 见下 |
+| **中英文混合分辨** | Paraformer **双语 zh-en** 模型 | — |
+| **语言总结** | `Summarizer`：`基础的基，朋友的友` → `基友` | 4/4 |
+| **上下文理解** | 事实图 + 对话状态 | 20/20 |
+| **网络学习 + 用户偏好 + 新知识覆盖** | `NetworkLearner` / `PrefProfiler` / `Store` | 12/12 |
 
-**首次启动**会把 460MB 模型从 APK 释放到私有目录（约 2.5 秒），之后直接复用。
+### 多音字到底准了多少
 
----
+同一句"水在一百摄氏度沸腾"，用我们自己的真实录音对比：
 
-## 这是什么
-
-| 能力 | 实现方式 |
+| 引擎 | 识别结果 |
 |---|---|
-| **语音识别** | Vosk 离线中文模型（42 MB，内置在 APK 里） |
-| **对话生成** | Qwen2.5-0.5B-Instruct（int4 量化 ONNX，460 MB，内置） |
-| **事实问答** | 本地知识库 + 规则推理引擎（1795 条事实） |
-| **语音合成** | 调用系统 TTS 引擎（可离线） |
-| **联网** | ❌ 完全不需要 |
+| Vosk small（旧，42 MB） | `水灾 一百 舒适度 都 沸腾` ❌ |
+| **Paraformer（现，213 MB）** | **`水在一百摄氏度沸腾`** ✅ |
 
-回答走**两层链路**：
-
-1. **本地知识检索 / 因果推理** —— 事实类问题（"卡卡是什么""东吴是谁建立的"）
-   必须准确，由规则引擎作答，不允许模型改写
-2. **预训练对话模型** —— 闲聊、问候、没有明确事实可查的问题交给它生成
-
-两者都不会 → **反问用户**（原版行为），用户答完就学会，下次就会了。
-
-### 实测效果
-
-```
-事实类（走知识库，约 1ms）
-  你是谁        →  我是kiki，一个语音助手，住在你的手机里。
-  卡卡是什么     →  卡卡是猫、哺乳动物、动物、生物。我记性很好的。
-  东吴是谁建立的  →  东吴由孙权建立。
-
-闲聊类（走模型，约 3 秒）
-  你好          →  你好，Kiki！有什么问题或者需要帮助的吗？
-  我好累啊       →  给你点休息时间吧。
-```
+"在/灾"、"摄氏/舒适度"这类易混词是 Vosk 的死穴，也是原版强调"多音字分辨"的原因。
 
 ---
 
-## 技术要点
+## 自动对话，没有按钮
 
-### 为什么用 ONNX Runtime 而不是 llama.cpp
-
-Android 有官方预编译的 `onnxruntime-android`（`libonnxruntime.so` + Java API），
-**零编译**即可集成。llama.cpp 需要 NDK 自行编译 arm64 原生库，成本高得多。
-
-### 手写 Qwen 分词器的踩坑记录
-
-ONNX Runtime 只提供算子，**不带分词**。所以字节级 BPE 是**纯 Java 手写**的
-（[QwenTokenizer.java](android-app/src-native/com/kiki/android/QwenTokenizer.java)）。
-
-最容易错的是**预分词正则**。第一版误用了 Python 的 `\w`（它**包含汉字**），
-导致中文被整段当成一个词，与官方不符（13 个测试用例只对 3 个）。
-正确写法（取自 `tokenizer.json` 的 `pre_tokenizer.pattern`）：
+原版**全程不需要用户操作**：
 
 ```
-(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|
- ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+   她说话(TTS)  →  说完自动开始录音  →  你说  →  静音判定结束
+        ↑                                              ↓
+        └──────────  识别 → 思考 → 回答  ←──────────────┘
 ```
 
-改对之后，与 HuggingFace 分词结果 **13/13 完全一致**（含中英混排、数字、标点）。
+底部那条**左右游走的红色条**（两头渐隐、到端点消失 0.1 秒）只在**她说话时**出现。
 
-### 量化档位的坑（重要）
+界面上**没有任何按钮、输入框或提示文字**。
 
-官方 `model_int8.onnx` **量化有缺陷**，输出重复胡话：
+---
+
+## 技术路线：为什么不用语言模型
+
+早期版本挂过一个 Qwen2.5-0.5B（460MB），后来**整体删除**，改回规则引擎。原因：
+
+| 能力 | 语言模型 | 规则引擎 |
+|---|---|---|
+| 遇到不懂的 | ❌ 直接编答案 | ✅ **说"我不知道"，然后问你** |
+| 学会后推导 | ❌ 不可控 | ✅ 写进事实图，下次能查 |
+| 事实准确性 | ❌ 会改写事实 | ✅ 检索即答案 |
+| 逐字复现原版行为 | ❌ 概率生成 | ✅ 确定性 |
+
+**当前 APK 225.7 MB** —— 其中 213 MB 是 Paraformer 语音模型（对比带语言模型的 429 MB）。
+
+---
+
+## 架构
 
 ```
-问: 你是谁  →  Assistant: 你这是什么问题？(重复 6 次)
+用户语音
+   ↓
+[Paraformer 离线识别]  → 文本        (sherpa-onnx,int8 量化,中英双语)
+   ↓
+[KikiDialog 对话状态机]              ← 主动学习闭环的核心
+   ├─ IDLE         空闲:意图分派
+   ├─ ASKING_WHO   刚问"X 是谁",等用户说身份
+   └─ ASKING_CAUSE 刚问"是 Y 让 X 出名吗",等确认
+   ↓
+[KikiBrain] 编排:状态机 → 本地记忆 → 内置问答 → 语言总结 → 事实检索 → 联网 → 反问
+   ↓
+[Brain 事实图] 内置 1795 条 + 自学的
+   ├─ 正向 A→rel→B     ├─ 逆向 B←rel←A
+   ├─ 传递 A→B→C       └─ 因果 X 因为 Y
+   ↓
+[Store 本地库] 事实带**来源优先级 + 时间戳**
+   taught(100) > corrected(80) > net(50) > builtin(30) > inferred(10)
+   同 (主语,关系) 下优先级高者胜 → **新知识覆盖旧知识**
+   但**联网知识不会覆盖用户亲口教的**
+   ↓
+[PrefProfiler 用户偏好] 观察说话长度/提问习惯/常聊话题 → 调整她的措辞
+   ↓
+[模板生成回答]（非模型生成）
+   ↓
+[TTS 朗读] → 念完自动开始听
 ```
 
-换 **`model_q4f16.onnx` 才正确**，而且**快一倍**（17 字/秒 vs 9.6）。
-本项目内置的是 q4f16。
+### 关键源文件
 
-### 一个会崩溃的坑：OrtSession.Result 的生命周期
+| 文件 | 职责 |
+|---|---|
+| `KikiDialog.java` | **对话状态机** —— 反问/追问/记住/推导/否定的多轮闭环 |
+| `KikiBrain.java` | 总编排:把状态机、检索、总结、事实图串起来 |
+| `Brain.java` | 事实图:因果/逆向/传递/分类继承推理 |
+| `KikiBot.java` | 检索层:内置问答 + 分词（4 万词表）+ 质量闸 |
+| `Summarizer.java` | **语言总结**（"X的A，Y的B" → AB，且必须命中词表） |
+| `NetworkLearner.java` | **联网学习**：维基 → 百度百科兜底 |
+| `PrefProfiler.java` | **用户偏好**画像 |
+| `Store.java` | 本地库:来源优先级 + 时间戳 + 覆盖规则 |
+| `ListeningBar.java` | 底部红色移动条（自定义 View,彗星拖尾） |
+| `OfflineRecognizer.java` | 语音识别 + 静音判定 + 自适应门限 |
+| `ModelInstaller.java` | 从 assets 释放模型（带**内容指纹**，换模型自动生效） |
 
-`session.run()` 返回的 `Result` 对象**持有 KV 缓存的原生内存**。
-如果 `Result` 被 GC 回收，那些张量就成了**悬空指针**，
-下一轮再喂给 `session.run` 就会段错误：
+### 自检（真机运行，写 logcat）
 
+| 自检 | 用例数 | 覆盖 |
+|---|---|---|
+| `EngineSelfTest` | 20 | 推理能力 |
+| `DialogSelfTest` | 4 | 主动学习闭环 + 否定删除 |
+| `Feature2SelfTest` | 12 | 覆盖规则 / 偏好 / 联网 |
+| `SummarizerSelfTest` | 4 | 语言总结 |
+
+```bash
+adb logcat -s kiki-engine kiki-dialog-test kiki-feat2 kiki-sum
 ```
-Fatal signal 11 (SIGSEGV) in libonnxruntime.so
-  Java_ai_onnxruntime_OrtSession_run
-```
-
-正确做法：**持有 `Result` 直到下一步推理完成**，再 close 它。
-见 [LlmEngine.java](android-app/src-native/com/kiki/android/LlmEngine.java)。
-
-### asset 路径的反斜杠
-
-aapt2 打包时会把 `assets/llm/model.onnx` 存成 `assets/llm\model.onnx`
-（**反斜杠**）。而 `AssetManager` 对分隔符的兼容性因版本而异。
-解决办法：**两种都试**，哪种能开用哪种。
 
 ---
 
 ## 构建
 
-**不用 Gradle，不用 Android Studio，不用 androidx。**
-纯手工工具链：`aapt2 → javac → d8 → zipalign → apksigner`。
-
-### 需要
-
-| 组件 | 版本 | 说明 |
-|---|---|---|
-| JDK | 21 | `javac` 需加 `-source 8 -target 8` + `-bootclasspath android.jar` |
-| Android SDK | build-tools 35.0.0 + platform-35 | — |
-| ONNX Runtime | `onnxruntime-android:1.20.0` | Maven Central 取 AAR（26.6 MB） |
-| Vosk | `vosk-android` + `jna` | 同上 |
-
-### 构建命令
+**不用 Gradle / Android Studio / androidx**，纯手工工具链：
+`aapt2 → javac → d8 → zipalign → apksigner`
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File android-app\build_apk.ps1
 ```
 
-> ⚠️ Vosk / JNA / ONNX Runtime 的 `classes.jar` 必须作为 **d8 的输入**，
-> 不能放 `--classpath`，否则运行时报 `NoClassDefFoundError`。
+产物：`android-app/build/kiki-v1.0.apk`（约 225.7 MB）
 
-> 注：构建需要 `assets/llm/model.onnx`（460MB）等大文件。
-> 它们因体积原因**未纳入版本控制**，详见文末的「技术踩坑记录」。
-
----
-
-## 目录结构
-
-```
-android-app/
-  src-native/com/kiki/android/      Java 源码（构建时直接编译，无 Gradle）
-    MainActivity.java              界面（全宽条纹消息行 + 底部说话区）
-    LlmEngine.java                 ONNX 推理 + KV 缓存生成循环
-    LlmBootstrap.java              模型释放与载入
-    QwenTokenizer.java             手写 Qwen 字节级 BPE
-    ChatBrain.java                 回答链路编排
-    Brain.java                     规则推理引擎（因果/属性/分类继承）
-    KikiBot.java                   检索层
-    OfflineRecognizer.java         Vosk 语音识别
-    SpeechManager.java             TTS
-    ModelInstaller.java            语音模型释放
-    EngineSelfTest.java            20 条推理自检
-  app/src/main/                    资源与清单
-  build_apk.ps1                    构建脚本
-  README.md                        构建细节与完整踩坑记录
-docs/
-  kiki原作者追查档案.md             2011 年原项目的追查记录
-  release-v1.0.md                  v1.0 发布说明
-  寻找-kiki原作者.md                寻人帖
-```
+> **语音模型不在仓库里**（213 MB，超过 GitHub 单文件 100 MB 上限），
+> 放在 Releases 附件中。构建前把它放到
+> `android-app/app/src/main/assets/asr/`，需要两个文件：
+> `model.int8.onnx` 与 `tokens.txt`（Paraformer 双语 zh-en）。
 
 ---
 
-## 界面
+## 安装要求
 
-还原 2011 年原版的风格：
-
-- **全宽条纹消息行** —— AI 回复白底半透明 + 深色字；用户消息深底半透明 + 白字
-- **底部灰色说话区** —— 长按说话（或点一下开始、再点一下结束）
-- **无打字输入框** —— 原版是纯语音
-- **启动时无任何提示文字**
+| 要求 | 值 |
+|---|---|
+| **CPU 架构** | **仅 arm64-v8a** |
+| **系统版本** | Android 7.0+（API 24） |
+| **内存** | 建议 4 GB+（模型 213 MB 需内存映射） |
+| **可用存储** | 约 450 MB（APK 225.7 MB + 首次启动释放模型 213 MB） |
+| **麦克风** | 必须授权（自动录音要用） |
 
 ---
 
 ## 已知限制
 
-- 只支持 **arm64**，32 位老机型装不上
-- 语音合成依赖**系统 TTS 引擎**。若系统没设默认引擎
-  （`settings get secure tts_default_synth` 返回 `null`），需先装一个中文语音引擎
-- 小米 TTS 实测是**在线合成**（`onlyOffline=false`），没网时可能不出声
-- 对话模型只有 0.5B 参数，复杂问题会答得比较浅
+- 只支持 arm64
+- 语音合成依赖**系统 TTS 引擎**；没有引擎时会用超时兜底推进对话
+- **中文维基在大陆通常不可达**，联网学习实际主要靠百度百科兜底；
+  两个源都拿不到时会说"我查不到"（不编答案）
+- 内置知识库 1795 条事实，覆盖面有限 —— 但她会**问你**，所以能自己长
+- 立绘：原版底部有 Q 版立绘，本复现**没有**（从原版视频里抠图失败，
+  因为原版条纹本身在滚动，底色差法与时间方差法都失效）
 
 ---
 
 ## 关于 2011 年的同名作品
 
-2011 年有个小团队做的东西也叫 **kiki**：本地运行、会主动记忆、有逻辑推理，
-需要 8G 存储卡（7G 信息库 + 1G 记忆库），中英文混说也能听懂。
-它在当时引起过不小的关注（B 站 20 万播放、多个大吧转发、《现代快报》报道），
-但**最终没有正式发布**，作者至今未知。
+2011 年有个小团队做的东西也叫 kiki：本地运行、会主动记忆、有逻辑推理，
+需要 8G 存储卡（7G 信息库 + 1G 记忆库），在当时引起过不小的关注
+（B 站 20 万播放、多个大吧转发、《现代快报》报道），但**最终没有正式发布**。
 
-完整的追查过程（原始优酷/土豆视频 ID、传播时间线、10 位关键人物、14 条已排除通路）
+原版作者在视频里自述："谢谢我的朋友，是他提供了更快速的算法和完整的数据库，
+我只是做了个算法移植而已" —— 这解释了为什么他后来在贴吧说
+"我说我是安卓 kiki 作者有人信么"。
+
+追查过程（原始优酷/土豆视频 ID、传播时间线、10 位关键人物、14 条已排除通路）
 见 [docs/kiki原作者追查档案.md](docs/kiki原作者追查档案.md)。
+
+界面与交互规格见 [docs/原版界面与交互规格.md](docs/原版界面与交互规格.md)，
+原版视频逐帧分析与能力清单见 [docs/原版视频分析.md](docs/原版视频分析.md)。
 
 **本仓库与那个项目没有代码关系**，只是同名 + 同一目标的一次独立尝试。
 
@@ -215,7 +216,5 @@ docs/
 
 ## 许可
 
-本项目代码仅供学习研究。
-
-**注意**：`assets/` 内含第三方模型（Qwen2.5-0.5B、Vosk 中文模型），
-它们各自遵循原作者的许可协议，请自行确认使用范围。
+代码仅供学习研究。
+内置语音模型为 **Paraformer**（阿里达摩院），经 sherpa-onnx 分发，遵循其原作者许可。
