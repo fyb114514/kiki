@@ -1,4 +1,4 @@
-package com.marisa.kiki;
+package com.kiki.android;
 
 /** 引擎返回的一条回答。 */
 public class Answer {

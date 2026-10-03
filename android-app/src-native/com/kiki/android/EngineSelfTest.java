@@ -1,4 +1,4 @@
-package com.marisa.kiki;
+package com.kiki.android;
 
 import android.content.res.AssetManager;
 import android.util.Log;
@@ -53,7 +53,7 @@ public class EngineSelfTest {
             @Override
             public void run() {
                 try {
-                    MarisaBot bot = new MarisaBot(assets);
+                    KikiBot bot = new KikiBot(assets);
                     int ok = 0;
                     StringBuilder fails = new StringBuilder();
                     for (String[] c : CASES) {

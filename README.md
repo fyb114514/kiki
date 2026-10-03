@@ -1,148 +1,220 @@
-# marisa-revive · 白丝魔理沙怀旧服
+# kiki — 本地离线语音助手（Android）
 
-东方 Project 角色「白丝魔理沙」的网页聊天机器人。一个可教化的"调教型"关键词检索机器人:
-用户用 `关键词`回答` 的格式教它说话,它记住后,别人提问命中关键词就返回对应回答。
+一个**完全离线运行**的中文语音助手。听你说话、陪你聊天、记住你教的东西。
+模型和语音引擎全部内置，**不需要联网，不依赖任何云服务**。
 
-> 🍄 这个项目的机制最早可以追溯到 2011 年的 QQ 调教 bot(原始版本已失传)。
-> 本仓库是 2018-2019 年的网页版复刻,2026 年经本地现代化重构后重新开源。
+[![Release](https://img.shields.io/badge/release-v1.0-blue)](https://github.com/fyb114514/kiki/releases/tag/v1.0)
 
-## 参考项目
-
-本仓库基于以下项目重构:
-
-- **[TohoOutsiders/web-marisa](https://github.com/TohoOutsiders/web-marisa)** —— 原作者 gutrse3321(Tomonori)于 2018-2019 年发布的网页版"白丝魔理沙"聊天机器人(Go + iris/gin 后端、Vue 2 前端,线上已停服)。本仓库的前后端均以其为蓝本:
-  - 后端:由 Go(iris → gin)重写为 Python FastAPI,业务逻辑(教学/回复/匹配阈值/合并规则)与 API 契约保持一致
-  - 前端:由 Vue 2 + webpack 重写为 Vue 3 + Vite,界面布局、指令系统、视觉元素(立绘/配色)还原原版
-  - 原项目的 `server/`(Go 版)目录在本仓库中保留作参考,已弃用
-- **2010 年的原始调教 bot**(作者孙鸭子)—— 本项目的 `teach`/`forget`/`status` 指令体系和"用户教学驱动"玩法源自那个年代的 QQ 调教 bot 传统,原始实现已失传,机制经原网页版传承至今
-
-若需查看原始实现,可访问原仓库(注意:原仓库 master/gin/iris 分支内容与本仓库差异较大)。
+> 本项目是对 2011 年那个同名作品 **kiki** 的一次**独立复现**。
+> 原项目从未公开发布，作者至今未知 —— 追查记录见
+> [kiki 原作者追查档案](docs/kiki原作者追查档案.md)。
 
 ---
 
-## 它是什么
+## 下载
 
-- **不是 AI** —— 没有模型、没有生成式回复。核心是一个关键词匹配的检索式聊天机器人
-- **知识来自用户** —— 你教它什么,它就会什么。教得越多越"聪明"
-- **指令系统**(仿 2011 年 QQ 调教 bot):
-  - `teach` 进入教学模式,然后输入 `关键词`回答`(反引号分隔)
-  - `forget` 忘记最后教的回答
-  - `status` 查看当前掌握的知识条数
-
-## 工作原理
+**[⬇ MarisaKiki.apk（429 MB）](https://github.com/fyb114514/kiki/releases/download/v1.0/MarisaKiki.apk)**
 
 ```
-教学:  用户输入 "你好`你好呀,我是白丝魔理沙!"(前端拆分后 POST /Add)
-       └─ 后端 jieba 分词 -> 去重合并 -> 存 MySQL(memorise 表)
-
-提问:  用户输入 "你好"(POST /Reply)
-       └─ 1. raw_keyword 精确匹配优先
-          ├─ 2. jieba 分词,查内存倒排索引
-          ├─ 3. 与已有词条算分词重合度,>= 40% 命中
-          └─ 4. 命中多条随机选一条;全不中返回兜底话术
+SHA256: 1539CD0739AF4E9D0D585340CA68E4275AC2647B10E96AF41B70B50FEA93483B
+大小:   429.1 MB (449,940,118 字节)
 ```
 
-详细流程见 `server-py/service.py`(代码注释详尽)。
+### 安装要求
 
-## 技术栈
+| 要求 | 值 | 原因 |
+|---|---|---|
+| **CPU 架构** | **仅 arm64-v8a** | 原生库只编了 arm64 |
+| **系统版本** | Android 7.0+（API 24） | minSdk |
+| **内存** | 建议 4 GB+ | 实测峰值约 1.8 GB 原生内存 |
+| **可用存储** | 约 1.2 GB | APK 429MB + 首次释放模型 460MB + 语音模型 65MB |
 
-| 层 | 技术 |
-|----|------|
-| 后端 | Python 3.11 · FastAPI · SQLAlchemy 2 · jieba 分词 |
-| 前端 | Vue 3.5 · Vite 8 · TypeScript 5 · Sass |
-| 数据库 | SQLite(默认,零依赖零内存);可选 MySQL/MariaDB(`DB_TYPE=mysql`) |
+**首次启动**会把 460MB 模型从 APK 释放到私有目录（约 2.5 秒），之后直接复用。
+
+---
+
+## 这是什么
+
+| 能力 | 实现方式 |
+|---|---|
+| **语音识别** | Vosk 离线中文模型（42 MB，内置在 APK 里） |
+| **对话生成** | Qwen2.5-0.5B-Instruct（int4 量化 ONNX，460 MB，内置） |
+| **事实问答** | 本地知识库 + 规则推理引擎（1795 条事实） |
+| **语音合成** | 调用系统 TTS 引擎（可离线） |
+| **联网** | ❌ 完全不需要 |
+
+回答走**两层链路**：
+
+1. **本地知识检索 / 因果推理** —— 事实类问题（"卡卡是什么""东吴是谁建立的"）
+   必须准确，由规则引擎作答，不允许模型改写
+2. **预训练对话模型** —— 闲聊、问候、没有明确事实可查的问题交给它生成
+
+两者都不会 → **反问用户**（原版行为），用户答完就学会，下次就会了。
+
+### 实测效果
+
+```
+事实类（走知识库，约 1ms）
+  你是谁        →  我是kiki，一个语音助手，住在你的手机里。
+  卡卡是什么     →  卡卡是猫、哺乳动物、动物、生物。我记性很好的。
+  东吴是谁建立的  →  东吴由孙权建立。
+
+闲聊类（走模型，约 3 秒）
+  你好          →  你好，Kiki！有什么问题或者需要帮助的吗？
+  我好累啊       →  给你点休息时间吧。
+```
+
+---
+
+## 技术要点
+
+### 为什么用 ONNX Runtime 而不是 llama.cpp
+
+Android 有官方预编译的 `onnxruntime-android`（`libonnxruntime.so` + Java API），
+**零编译**即可集成。llama.cpp 需要 NDK 自行编译 arm64 原生库，成本高得多。
+
+### 手写 Qwen 分词器的踩坑记录
+
+ONNX Runtime 只提供算子，**不带分词**。所以字节级 BPE 是**纯 Java 手写**的
+（[QwenTokenizer.java](android-app/src-native/com/marisa/kiki/QwenTokenizer.java)）。
+
+最容易错的是**预分词正则**。第一版误用了 Python 的 `\w`（它**包含汉字**），
+导致中文被整段当成一个词，与官方不符（13 个测试用例只对 3 个）。
+正确写法（取自 `tokenizer.json` 的 `pre_tokenizer.pattern`）：
+
+```
+(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|
+ ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+```
+
+改对之后，与 HuggingFace 分词结果 **13/13 完全一致**（含中英混排、数字、标点）。
+
+### 量化档位的坑（重要）
+
+官方 `model_int8.onnx` **量化有缺陷**，输出重复胡话：
+
+```
+问: 你是谁  →  Assistant: 你这是什么问题？(重复 6 次)
+```
+
+换 **`model_q4f16.onnx` 才正确**，而且**快一倍**（17 字/秒 vs 9.6）。
+本项目内置的是 q4f16。
+
+### 一个会崩溃的坑：OrtSession.Result 的生命周期
+
+`session.run()` 返回的 `Result` 对象**持有 KV 缓存的原生内存**。
+如果 `Result` 被 GC 回收，那些张量就成了**悬空指针**，
+下一轮再喂给 `session.run` 就会段错误：
+
+```
+Fatal signal 11 (SIGSEGV) in libonnxruntime.so
+  Java_ai_onnxruntime_OrtSession_run
+```
+
+正确做法：**持有 `Result` 直到下一步推理完成**，再 close 它。
+见 [LlmEngine.java](android-app/src-native/com/marisa/kiki/LlmEngine.java)。
+
+### asset 路径的反斜杠
+
+aapt2 打包时会把 `assets/llm/model.onnx` 存成 `assets/llm\model.onnx`
+（**反斜杠**）。而 `AssetManager` 对分隔符的兼容性因版本而异。
+解决办法：**两种都试**，哪种能开用哪种。
+
+---
+
+## 构建
+
+**不用 Gradle，不用 Android Studio，不用 androidx。**
+纯手工工具链：`aapt2 → javac → d8 → zipalign → apksigner`。
+
+### 需要
+
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| JDK | 21 | `javac` 需加 `-source 8 -target 8` + `-bootclasspath android.jar` |
+| Android SDK | build-tools 35.0.0 + platform-35 | — |
+| ONNX Runtime | `onnxruntime-android:1.20.0` | Maven Central 取 AAR（26.6 MB） |
+| Vosk | `vosk-android` + `jna` | 同上 |
+
+### 构建命令
+
+```powershell
+powershell -ExecutionPolicy Bypass -File android-app\build_apk.ps1
+```
+
+> ⚠️ Vosk / JNA / ONNX Runtime 的 `classes.jar` 必须作为 **d8 的输入**，
+> 不能放 `--classpath`，否则运行时报 `NoClassDefFoundError`。
+
+> 注：构建需要 `assets/llm/model.onnx`（460MB）等大文件。
+> 它们因体积原因**未纳入版本控制**，详见 [android-app/README.md](android-app/README.md)。
+
+---
 
 ## 目录结构
 
 ```
-web-marisa/
-├── server-py/          # Python 后端(FastAPI)
-│   ├── main.py         # 入口:FastAPI + 路由
-│   ├── service.py      # 业务逻辑:分词/匹配/合并/限流
-│   ├── database.py     # SQLAlchemy 引擎 + 启动迁移
-│   ├── models.py       # ORM 模型
-│   ├── config.py       # 配置(.env / 环境变量 / 默认值)
-│   └── test_api.py     # 接口测试(29 项)
-├── client/             # 前端(Vue 3 + Vite)
-│   └── src/            # 聊天室界面、API 封装、样式
-├── server/             # 旧 Go 版后端(保留参考,已弃用)
-└── seed_qa.py          # 预置魔理沙人设问答对(39 条)
+android-app/
+  src-native/com/marisa/kiki/      Java 源码（构建时直接编译，无 Gradle）
+    MainActivity.java              界面（全宽条纹消息行 + 底部说话区）
+    LlmEngine.java                 ONNX 推理 + KV 缓存生成循环
+    LlmBootstrap.java              模型释放与载入
+    QwenTokenizer.java             手写 Qwen 字节级 BPE
+    ChatBrain.java                 回答链路编排
+    Brain.java                     规则推理引擎（因果/属性/分类继承）
+    MarisaBot.java                 检索层
+    OfflineRecognizer.java         Vosk 语音识别
+    SpeechManager.java             TTS
+    ModelInstaller.java            语音模型释放
+    EngineSelfTest.java            20 条推理自检
+  app/src/main/                    资源与清单
+  build_apk.ps1                    构建脚本
+  README.md                        构建细节与完整踩坑记录
+docs/
+  kiki原作者追查档案.md             2011 年原项目的追查记录
+  release-v1.0.md                  v1.0 发布说明
+  寻找-kiki原作者.md                寻人帖
 ```
 
-## 快速开始(本地开发)
+---
 
-依赖:Python 3.11+、Node 18+。数据库默认 SQLite,**无需安装数据库软件**。
+## 界面
 
-```bash
-# 1. 后端(首次启动自动建表 server-py/webmarisa.db)
-cd server-py
-uv venv && uv pip install fastapi uvicorn sqlalchemy jieba
-uv run python -m uvicorn main:app --host 127.0.0.1 --port 3000
+还原 2011 年原版的风格：
 
-# 2. 前端
-cd ../client
-npm install
-npm run dev        # http://localhost:8888
+- **全宽条纹消息行** —— AI 回复白底半透明 + 深色字；用户消息深底半透明 + 白字
+- **底部灰色说话区** —— 长按说话（或点一下开始、再点一下结束）
+- **无打字输入框** —— 原版是纯语音
+- **启动时无任何提示文字**
 
-# 3. (可选)预置魔理沙人设问答
-cd ..
-python seed_qa.py  # 插入 39 条预设问答对
-```
+---
 
-浏览器打开 http://localhost:8888 即可聊天。
+## 已知限制
 
-> 想用 MySQL/MariaDB?改 `server-py/.env` 里 `DB_TYPE=mysql` 并填 `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME`,依赖加上 pymysql,建库后启动自动建表/迁移。
+- 只支持 **arm64**，32 位老机型装不上
+- 语音合成依赖**系统 TTS 引擎**。若系统没设默认引擎
+  （`settings get secure tts_default_synth` 返回 `null`），需先装一个中文语音引擎
+- 小米 TTS 实测是**在线合成**（`onlyOffline=false`），没网时可能不出声
+- 对话模型只有 0.5B 参数，复杂问题会答得比较浅
 
-## API 文档
+---
 
-全部接口:POST + form-urlencoded,返回 JSON `{code, data}`(HTTP 状态恒为 200,业务码在 JSON 里):
+## 关于 2011 年的同名作品
 
-| 接口 | 参数 | 说明 | 返回 |
-|------|------|------|------|
-| `POST /Add` | `ip`, `keyword`, `answer` | 教学(分词入库,子集合并) | `{code:200, data:{ip, keyword, answer}}` |
-| `POST /Reply` | `ip`, `keyword` | 提问(精确匹配优先 → 分词命中 ≥40% 随机选) | 命中 `{code:200, data:{answer}}` / 未命中 `{code:10001, data:{answer:兜底话术}}` |
-| `POST /Forget` | `answer` | 按回答删除 | `{code:200, data:"success"}` |
-| `POST /Status` | — | 知识条数 | `{code:200, data:整数}` |
-| `POST /Hint` | — | 随机一条提示线索(已审核内容) | `{code:200, data:{keyword, answer}}` |
-| `GET/POST /` | — | 探活 | `{code:200, message:"hello Marisa~"}` |
+2011 年有个小团队做的东西也叫 **kiki**：本地运行、会主动记忆、有逻辑推理，
+需要 8G 存储卡（7G 信息库 + 1G 记忆库），中英文混说也能听懂。
+它在当时引起过不小的关注（B 站 20 万播放、多个大吧转发、《现代快报》报道），
+但**最终没有正式发布**，作者至今未知。
 
-业务码:`200` 成功、`400` 参数不合法/黑名单/违禁词、`429` 限流(教学每 IP 每分钟 10 次,回复每 IP 每分钟 30 次)、`10001` 未命中。
+完整的追查过程（原始优酷/土豆视频 ID、传播时间线、10 位关键人物、14 条已排除通路）
+见 [docs/kiki原作者追查档案.md](docs/kiki原作者追查档案.md)。
 
-## 特性
+**本仓库与那个项目没有代码关系**，只是同名 + 同一目标的一次独立尝试。
 
-- 内存倒排索引(分词 → 记忆),回复不走全表扫描
-- 输入校验(关键词 ≤50 字、回答 ≤500 字,非空)
-- 每 IP 教学限流(每分钟 10 次)
-- 命中计数 `hit_count`、最近未命中关键词记录(内存,重启清空)
-- 存储型 XSS 防护(前端消息纯文本渲染,`v-text`)
-- **深夜催睡**:凌晨 3:50 ~ 6:00 之间不回复,只输出固定催睡话术(文案在 `server-py/service.py` 的 `SLEEP_ANSWER`)
-- **AI 内容审核(先审后玩)**:教学内容先进入待审队列,不立即生效;每小时由 DeepSeek 批量审核(每批最多 10 条),通过才生效,被拒的回答进黑名单(同回答再次教学直接拒绝)
-- **违禁词前处理**:`server-py/banned_words.txt` 配置正则词库,教学回答命中违禁词直接拒绝+拉黑,不进待审队列(可自行增删正则)
-## TODO / Roadmap
+---
 
-- [x] **待学习清单**:展示"被问过但没答上"的关键词(服务端 `miss_keyword` 表聚合,被问 >=2 次且未学会),教学审核通过后自动隐藏 —— 已实现(2026-08-06)
-- [x] **资讯工具**:时间 / 日期 / 计算器(离线,默认启用),天气 / 汇率 / 百科(可插拔,`AMAP_KEY`/`EXCHANGE_API`/`DICT_API` 配置后启用);精确匹配(用户教学)优先于工具 —— 已实现(2026-08-06)
-- [ ] **话题感知(theme)**:对多句对话整体判断话题,在特定话题内精准回答,而不是全局随机
-- [ ] **好感度系统(F-I)**:按用户维度记录好感(对话次数/时长/内容),影响回复倾向
-- [ ] **对象判断(flag)**:相同的话,对不同人 / 不同好感阶段 / 不同时间给出不同回复
-- [ ] **多人协作教学 + 调教师权限**:多用户共同完善同一知识条目,支持屏蔽管理
-- [ ] **代码执行支持**:教学时可编写简单脚本逻辑(需 AST 白名单防注入;`safe_eval.py` 已就绪)
-- [ ] **生产部署实测**:MySQL 模式真机验证、gunicorn 多进程写入固定节点方案文档化
+## 许可
 
-> 各项的详细实现方案(数据模型/接口/业务逻辑/前端改动点)见 `IMPLEMENTATION_PLAN.md`。
+本项目代码仅供学习研究。
 
-## 生产部署建议
-
-- **存储**:默认 SQLite 单文件,低配服务器(512M 内存)也能跑,无需装数据库;数据文件就是 `server-py/webmarisa.db`,备份=拷走一个文件。多人并发写入场景再考虑 MySQL(`DB_TYPE=mysql`)
-- 后端:`uvicorn` 建议用 `gunicorn -k uvicorn.workers.UvicornWorker` 多进程(注意:内存倒排索引为进程内态,多进程下各自维护,写入节点需固定;简单场景单进程即可,SQLite 也更适合单进程)
-- 前端:`npm run build` 后由 nginx 托管,`/api` 反向代理到后端(见 `client/vite.config.ts` 的 proxy 配置)
-
-## 致谢
-
-- 原始网页版作者:gutrse3321(Tomonori)2018-2019
-- 2010 年白丝魔理沙作者:孙鸭子,感谢那个年代的所有调教 bot 玩家
-- 东方 Project © ZUN / 上海爱丽丝幻乐团
-
-## License
-
-MIT(见各子目录 LICENSE 说明;原始网页版未声明许可证,仅保留学习交流用途)
+**注意**：`assets/` 内含第三方模型（Qwen2.5-0.5B、Vosk 中文模型），
+它们各自遵循原作者的许可协议，请自行确认使用范围。

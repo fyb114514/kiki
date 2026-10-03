@@ -1,4 +1,4 @@
-package com.marisa.kiki;
+package com.kiki.android;
 
 import android.content.res.AssetManager;
 
@@ -1734,7 +1734,7 @@ public class Brain {
      * || Character.isSpaceChar(c)}。
      * 不能用 Java 的 String.trim()：它只去 {@code <= 0x20} 的字符，全角空格
      * U+3000、不换行空格 U+00A0 都去不掉，而 Kotlin 版能去掉。
-     * （与同目录 MarisaBot.ktTrim 同一套语义。）
+     * （与同目录 KikiBot.ktTrim 同一套语义。）
      */
     private static boolean isKtWhitespace(char c) {
         return Character.isWhitespace(c) || Character.isSpaceChar(c);

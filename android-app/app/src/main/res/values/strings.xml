@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 屏幕上的角色自称 kiki(素材来源是白丝魔理沙,呈现为 kiki) -->
+    <!-- 屏幕上的角色自称 kiki -->
     <string name="app_name">kiki</string>
 </resources>

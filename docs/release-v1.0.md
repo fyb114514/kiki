@@ -55,7 +55,7 @@
   纯 `aapt2 → javac → d8 → zipalign → apksigner`
 
 详细的踩坑记录（量化档位缺陷、SIGSEGV 生命周期问题、asset 反斜杠等）见仓库内
-[android-app/README.md](https://github.com/OWNER/REPO/blob/main/android-app/README.md)。
+[android-app/README.md](https://github.com/fyb114514/kiki/blob/main/android-app/README.md)。
 
 ## 关于 2011 年的同名作品
 
@@ -66,7 +66,7 @@
 （B 站 20 万播放、多个大吧转发、《现代快报》报道），
 但**最终没有正式发布**，作者至今未知。
 
-完整的追查记录见 [docs/kiki原作者追查档案.md](https://github.com/OWNER/REPO/blob/main/docs/kiki%E5%8E%9F%E4%BD%9C%E8%80%85%E8%BF%BD%E6%9F%A5%E6%A1%A3%E6%A1%88.md)。
+完整的追查记录见 [docs/kiki原作者追查档案.md](https://github.com/fyb114514/kiki/blob/main/docs/kiki%E5%8E%9F%E4%BD%9C%E8%80%85%E8%BF%BD%E6%9F%A5%E6%A1%A3%E6%A1%88.md)。
 
 ## 校验
 

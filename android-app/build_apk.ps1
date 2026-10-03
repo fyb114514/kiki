@@ -1,4 +1,4 @@
-﻿﻿﻿﻿# 手工构建 APK:完全离线,不需要 Gradle / AGP / 任何依赖下载。
+﻿﻿# 手工构建 APK:完全离线,不需要 Gradle / AGP / 任何依赖下载。
 #
 # 为什么走手工构建
 # ----------------
@@ -53,7 +53,7 @@ $classesDir= "$out\classes"
 $dexDir    = "$out\dex"
 $apkUnsign = "$out\app-unsigned.apk"
 $apkAligned= "$out\app-aligned.apk"
-$apkFinal  = "$out\MarisaKiki.apk"
+$apkFinal  = "$out\kiki-v1.0.apk"
 $keystore  = "$out\debug.keystore"
 
 function Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -107,7 +107,7 @@ Step "aapt2 link(链接资源,生成 R.java)"
     --target-sdk-version 35 `
     --auto-add-overlay
 if ($LASTEXITCODE -ne 0) { throw "aapt2 link 失败" }
-Check "$genDir\com\marisa\kiki\R.java" '生成的 R.java'
+Check "$genDir\com\kiki\android\R.java" '生成的 R.java'
 Write-Host "    R.java 已生成"
 
 # ---------------- 4. javac 编译 Java ----------------
@@ -191,18 +191,18 @@ Step "签名"
 if (-not (Test-Path $keystore)) {
     & "$jdk\bin\keytool.exe" -genkeypair -v `
         -keystore $keystore `
-        -alias marisa `
+        -alias kiki `
         -keyalg RSA -keysize 2048 -validity 10000 `
-        -storepass marisa123 -keypass marisa123 `
-        -dname "CN=Marisa Kiki, OU=Local, O=Local, L=Local, S=Local, C=CN"
+        -storepass kiki123 -keypass kiki123 `
+        -dname "CN=Kiki, OU=Local, O=Local, L=Local, S=Local, C=CN"
     if ($LASTEXITCODE -ne 0) { throw "keytool 生成密钥失败" }
     Write-Host "    密钥已生成: $keystore"
 }
 & "$buildTools\apksigner.bat" sign `
     --ks $keystore `
-    --ks-key-alias marisa `
-    --ks-pass pass:marisa123 `
-    --key-pass pass:marisa123 `
+    --ks-key-alias kiki `
+    --ks-pass pass:kiki123 `
+    --key-pass pass:kiki123 `
     --out $apkFinal `
     $apkAligned
 if ($LASTEXITCODE -ne 0) { throw "apksigner 签名失败" }

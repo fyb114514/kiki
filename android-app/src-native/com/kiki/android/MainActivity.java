@@ -1,4 +1,4 @@
-package com.marisa.kiki;
+package com.kiki.android;
 
 import android.Manifest;
 import android.app.Activity;
@@ -26,7 +26,7 @@ import java.util.List;
  *   1. **一整条消息框**:每条消息占满整行,蓝白交替条纹(不是左右气泡)
  *      —— AI 靠左、用户靠右,靠对齐区分而不是靠气泡
  *   2. **长按下方灰色区域说话**:原版是纯语音,没有打字输入框
- *   3. **不知道就反问**:由 MarisaBot 负责("他是谁？",用户回答后学会)
+ *   3. **不知道就反问**:由 KikiBot 负责("他是谁？",用户回答后学会)
  *
  * 语音用离线的 Vosk 引擎:系统识别服务在本机不可用
  * (小米在线引擎对第三方调用返回 50010004),详见 OfflineRecognizer。
@@ -39,7 +39,7 @@ public class MainActivity extends Activity {
     private static final int TALK_IDLE = 0xFF3C3C3C;
     private static final int TALK_RECORDING = 0xFF3E7A46;
 
-    private MarisaBot bot;
+    private KikiBot bot;
     /** 神经语言模型 + 本地记忆(对应原作者的"本地+网络") */
     private ChatBrain brain;
     private Store store;
@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
         // FrameLayout 上 XML 的 background 在部分 ROM 会被忽略,这里用代码再设一次
         talkArea.setBackgroundColor(TALK_IDLE);
 
-        bot = new MarisaBot(getAssets());
+        bot = new KikiBot(getAssets());
         try {
             store = new Store(this);
             bot.setStore(store);

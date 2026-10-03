@@ -7,7 +7,7 @@
         这里用 NoActionBar 去掉标题栏(原来那条"白边"的一半),
         并把状态栏压成深色和背景融合(另一半"白边")。
     -->
-    <style name="Theme.MarisaKiki" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+    <style name="Theme.Kiki" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
         <item name="android:windowBackground">#102030</item>
 
         <!-- 状态栏:深色,和背景融为一体,不再是一条白边 -->

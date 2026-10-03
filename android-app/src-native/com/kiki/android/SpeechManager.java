@@ -1,4 +1,4 @@
-package com.marisa.kiki;
+package com.kiki.android;
 
 import android.content.Context;
 import android.content.Intent;

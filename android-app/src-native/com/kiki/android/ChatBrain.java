@@ -1,4 +1,4 @@
-package com.marisa.kiki;
+package com.kiki.android;
 
 import android.content.Context;
 import android.util.Log;
@@ -10,7 +10,7 @@ import java.util.List;
  *
  * 回答链路(两层,职责分明)
  * ------------------------
- *   1. **本地知识检索/推理**({@link MarisaBot} → Brain)
+ *   1. **本地知识检索/推理**({@link KikiBot} → Brain)
  *      事实类问题("卡卡是什么""东吴是谁建立的""小明的爷爷是谁")必须准确,
  *      所以由规则引擎作答,不允许模型改写。
  *   2. **预训练对话模型**({@link LlmEngine}, Qwen2.5-0.5B / ONNX Runtime)
@@ -33,7 +33,7 @@ public class ChatBrain {
     private static final String TAG = "kiki-chat";
 
     private final Context context;
-    private final MarisaBot retriever;
+    private final KikiBot retriever;
 
     /** 预训练对话模型(由上层在后台载入完成后注入)。为空则退回规则引擎。 */
     private volatile LlmEngine llm;
@@ -42,7 +42,7 @@ public class ChatBrain {
         void onStatus(String message);
     }
 
-    public ChatBrain(Context context, MarisaBot retriever) {
+    public ChatBrain(Context context, KikiBot retriever) {
         this.context = context;
         this.retriever = retriever;
     }

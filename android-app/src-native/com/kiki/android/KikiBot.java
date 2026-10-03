@@ -1,4 +1,4 @@
-package com.marisa.kiki;
+package com.kiki.android;
 
 import android.content.res.AssetManager;
 
@@ -28,11 +28,11 @@ import java.util.Set;
  * **答错比答不上更糟**,所以必须剔虚词后判实义词覆盖。
  *
  * ---------------------------------------------------------------------------
- * 本文件是 MarisaBot.kt 的逐行等价 Java 移植(纯 android.* / java.*,无任何
+ * 本文件是 KikiBot.kt 的逐行等价 Java 移植(纯 android.* / java.*,无任何
  * 第三方依赖,不用 androidx)。
  * ---------------------------------------------------------------------------
  */
-public class MarisaBot {
+public class KikiBot {
 
     /** 质量闸阈值:候选实义词被输入覆盖的比例低于它就宁可说不会。 */
     private static final double MIN_OVERLAP = 0.5;
@@ -128,7 +128,7 @@ public class MarisaBot {
 
     // ======================= 构造 =======================
 
-    public MarisaBot(AssetManager assets) {
+    public KikiBot(AssetManager assets) {
         this.brain = new Brain(assets);
         loadQa(assets);
         loadGreetings(assets);
