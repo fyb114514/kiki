@@ -291,6 +291,10 @@ public class MainActivity extends Activity {
     private void initBrain() {
         brain = new KikiBrain(this, bot, bot.getBrain());
         brain.setStore(store);
+        // 【修"退出就忘"】把本地库里攒下的事实灌回内存事实图。
+        // 之前 persistLearned() 一直在写库,但启动时从不读回来,
+        // 所以重启后所有自学知识全丢。
+        brain.restoreFacts();
         // 特性 2:偏好画像 + 联网学习
         if (store != null) {
             prefProfiler = new PrefProfiler(store);
@@ -468,6 +472,10 @@ public class MainActivity extends Activity {
                                                 if (r.ok && r.factCount > 0 && r.summary != null) {
                                                     // 学到了:直接用网络学到的内容回答
                                                     String learned = r.summary;
+                                                    // 联网事实是 NetworkLearner 直接写库的,
+                                                    // 内存事实图不知道 —— 补一次,否则
+                                                    // "刚学完再问还是答不出"。
+                                                    if (brain != null) brain.reloadFacts();
                                                     addMessage("kiki", learned);
                                                     speakThenListen(learned);
                                                 } else {

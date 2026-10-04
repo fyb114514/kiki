@@ -433,15 +433,54 @@ public class KikiBrain {
      */
     void forget(String s, String rel, String o) {
         if (s == null || rel == null || o == null) return;
+        // 【为什么要规范化】Brain.addFact 会把主宾语规范化后再存,
+        // 而删除时如果拿原始串去匹配,键对不上就删不掉 ——
+        // 用户截图里"说了不是她还记着"就是这个原因(之一)。
+        String ns = fact == null ? s : fact.normalize(s);
+        String no = fact == null ? o : fact.normalize(o);
         try {
-            if (fact != null) fact.removeFact(s, rel, o);
+            if (fact != null) {
+                fact.removeFact(ns, rel, no);
+                // 原始串也删一遍,覆盖"存的时候没规范化"的老数据
+                if (!ns.equals(s) || !no.equals(o)) fact.removeFact(s, rel, o);
+            }
         } catch (Throwable ignored) {
         }
         try {
-            if (store != null) store.forgetFact(s, rel, o);
+            if (store != null) {
+                store.forgetFact(s, rel, o);
+                if (!ns.equals(s) || !no.equals(o)) store.forgetFact(ns, rel, no);
+            }
         } catch (Throwable ignored) {
         }
-        android.util.Log.i("kiki-learn", "忘掉事实: " + s + " | " + rel + " | " + o);
+        android.util.Log.i("kiki-learn", "忘掉事实: " + ns + " | " + rel + " | " + no);
+    }
+
+    /**
+     * 把本地库里攒下的事实**灌回内存事实图**。
+     *
+     * 【这是"退出就忘"的根因】persistLearned() 一直在写 Store(fact 表),
+     * 但启动时从来没有把 loadFacts() 读回来 ——
+     * 于是重启之后内存事实图是空的,所有自学知识全丢。
+     */
+    void restoreFacts() {
+        if (store == null || fact == null) return;
+        try {
+            int n = 0;
+            for (String[] f : store.loadFacts()) {
+                if (f == null || f.length < 3) continue;
+                fact.addFact(f[0], f[1], f[2], Store.SRC_TAUGHT);
+                n++;
+            }
+            android.util.Log.i("kiki-learn", "启动时恢复自学事实 " + n + " 条");
+        } catch (Throwable t) {
+            android.util.Log.w("kiki-learn", "恢复事实失败: " + t);
+        }
+    }
+
+    /** 供联网学习后把事实补进内存图(NetworkLearner 只写库,不知道内存图) */
+    void reloadFacts() {
+        restoreFacts();
     }
 
     /** 查用户教过的问答 */

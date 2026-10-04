@@ -238,14 +238,32 @@ public class Store {
             // 本条胜出:把同 (s,rel) 里**不如它**的都删掉。
             //
             // 判据分两种(特性 2 自检暴露过这里漏了第二种):
-            //   1. 优先级更低                      -> 一定被覆盖
-            //   2. 优先级相同但更旧(updated_at 更小) -> 也被覆盖
-            // 只写第一种时,"同来源下新学的覆盖旧的"就不成立:
-            // 旧的那条会留在表里,loadFacts 会同时返回新旧两条,查询时就不知道信谁。
+            //   1. 优先级更低                   -> 一定被覆盖
+            //   2. 优先级相同但**更旧或同时**     -> 也被覆盖
+            // 只写第一种时,"同来源下新学的覆盖旧的"不成立:
+            // 旧的那条会留在表里,loadFacts 会同时返回新旧两条,查询时不知道信谁。
+            //
+            // 【第 2 条为什么用 <= 而不是 <】
+            //   两次写入可能落在**同一毫秒**(机器快,或测试连续写入),
+            //   updated_at 完全相等。若用 <,旧行不满足"更旧"就删不掉;
+            //   而当新旧的**宾语不同**时,INSERT OR REPLACE 也替换不掉它
+            //   (主键含宾语)——于是新旧并存,loadFacts 先返回旧的那条。
+            //   特性 2 自检的"同来源下新知识覆盖旧知识"就是这么假失败的。
+            // 【第 2 条为什么用 <= 而不是 <】
+            //   两次写入可能落在**同一毫秒**(机器快,或测试连续写入),
+            //   updated_at 完全相等。若用 <,旧行不满足"更旧"就删不掉;
+            //   而当新旧的**宾语不同**时,INSERT OR REPLACE 也替换不掉它
+            //   (主键含宾语)——于是新旧并存,loadFacts 先返回旧的那条。
+            //   语义上"本条正在写入,就应该赢",所以用 <=。
+            //
+            // 【必须排除本条(o <> ?)】
+            //   本条是**刚 INSERT 进去的**,它的 updated_at 正好等于 now,
+            //   满足 updated_at<=now。若不排除,这条 DELETE 会把**自己删掉**,
+            //   于是"写入后查不到"(特性 2 自检立刻从 11/12 掉到 6/12)。
             try {
                 int n = db.delete("fact",
-                        "s=? AND rel=? AND (priority<? OR (priority=? AND updated_at<?))",
-                        new String[]{subj, rel, String.valueOf(prio),
+                        "s=? AND rel=? AND o<>? AND (priority<? OR (priority=? AND updated_at<=?))",
+                        new String[]{subj, rel, obj, String.valueOf(prio),
                                      String.valueOf(prio), String.valueOf(now)});
                 if (n > 0) {
                     Log.i(TAG, "新知识覆盖旧知识: " + subj + "|" + rel + " <- [" + obj

@@ -173,12 +173,21 @@ public class KikiDialog {
         learnedIdentity = answer;      // 【原文】存一份,否定时要用它才删得中
         stateAt = System.currentTimeMillis();
 
-        // 1. 记住身份。用"是"作为关系(最常见的表述)
-        sink.remember(subject, "是", answer);
-        learned.add(new String[]{subject, "是", answer});
+        // 1. 抽身份。
+        //
+        // 【修 Bug】用户回答"康神是一条狗"时,原来把**整句**当身份存:
+        //     康神 | 是 | 康神是一条狗        <- 荒谬
+        // 导致追问句变成"是康神是一条狗让康神出名吗?"(用户截图里就是这个)。
+        // 正确做法:先看答案里有没有"…是…"结构,有就取"是"后面的部分。
+        String identity = extractPredicate(answer);
 
-        // 2. 从答案里抽出关键实体(用于追问)
-        String keyEntity = extractEntity(answer);
+        // 2. 记住身份。用"是"作为关系(最常见的表述)
+        sink.remember(subject, "是", identity);
+        learned.add(new String[]{subject, "是", identity});
+        learnedIdentity = identity;
+
+        // 3. 从身份里抽出关键实体(用于追问因果)
+        String keyEntity = extractEntity(identity);
 
         // 3. 追问因果:这个实体是不是让 X 出名的原因?
         state = State.ASKING_CAUSE;
@@ -335,6 +344,47 @@ public class KikiDialog {
      *     **"公司"是实体的一部分,不是身份后缀** —— 所以要剥的只有职位词。
      *  自检用例现在同时覆盖这两类,不会再退化。
      */
+    /**
+     * 从身份回答里抽出**真正的身份部分**。
+     *
+     *   "康神是一条狗"     -> "一条狗"       (有"是",取后半)
+     *   "微软公司CEO"      -> "微软公司CEO"  (没有"是",原样)
+     *   "他是微软公司CEO"   -> "微软公司CEO"  (剥掉主语代词)
+     *
+     * 【为什么必须有它】用户回答"康神是一条狗"时,原来把**整句**当身份存:
+     *     康神 | 是 | 康神是一条狗        <- 荒谬
+     * 于是追问句变成"是康神是一条狗让康神出名吗?"(用户截图里就是这个)。
+     */
+    static String extractPredicate(String answer) {
+        if (answer == null) return "";
+        String a = answer.trim();
+        if (a.isEmpty()) return a;
+
+        // 剥掉开头的主语代词("他是…" / "这个是…")
+        for (String p : new String[]{"他", "她", "它", "这个", "那个"}) {
+            if (a.startsWith(p) && a.length() > p.length()) {
+                String rest = a.substring(p.length());
+                if (rest.startsWith("是")) {
+                    a = rest;
+                    break;
+                }
+            }
+        }
+
+        // "X是Y" -> 取 Y(只处理第一个"是",且两边都要有内容)
+        int i = a.indexOf('是');
+        if (i > 0 && i < a.length() - 1) {
+            String tail = a.substring(i + 1).trim();
+            if (!tail.isEmpty()) return tail;
+        }
+        // 剥掉主语代词后可能剩下开头的"是"("他是微软公司CEO" -> "是微软公司CEO")
+        // 这时 indexOf('是') 为 0,上面那条 i>0 不成立,要单独处理。
+        while (a.startsWith("是") && a.length() > 1) {
+            a = a.substring(1).trim();
+        }
+        return a;
+    }
+
     static String extractEntity(String answer) {
         if (answer == null) return null;
         String s = answer.trim();

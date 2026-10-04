@@ -100,6 +100,10 @@ public class DialogSelfTest {
         total++;
         if (runNegative()) pass++;
 
+        // ---------- 用例 2.5:身份抽取(用户截图暴露的 bug) ----------
+        total++;
+        if (runPredicate()) pass++;
+
         // ---------- 用例 3:实体抽取 ----------
         total++;
         if (runExtract()) pass++;
@@ -188,6 +192,25 @@ public class DialogSelfTest {
         } else {
             Log.i(TAG, "  ✓ 否定.未写因果(正确)");
         }
+        return ok;
+    }
+
+    /**
+     * 身份抽取:回答"康神是一条狗"时,身份应该是"一条狗"而不是整句。
+     *
+     * 用户截图暴露的 bug:整句被当身份存下来,追问句就成了
+     * "是康神是一条狗让康神出名吗?" —— 荒诞。
+     */
+    private static boolean runPredicate() {
+        boolean ok = true;
+        ok &= eq("身份.康神是一条狗", KikiDialog.extractPredicate("康神是一条狗"), "一条狗");
+        ok &= eq("身份.微软公司CEO", KikiDialog.extractPredicate("微软公司CEO"), "微软公司CEO");
+        ok &= eq("身份.他是微软公司CEO", KikiDialog.extractPredicate("他是微软公司CEO"), "微软公司CEO");
+        ok &= eq("身份.一只猫", KikiDialog.extractPredicate("一只猫"), "一只猫");
+        // 追问句要用人话
+        String q = "是" + KikiDialog.extractEntity(KikiDialog.extractPredicate("康神是一条狗"))
+                 + "让康神出名吗？";
+        ok &= eq("身份.追问句自然", q, "是一条狗让康神出名吗？");
         return ok;
     }
 
