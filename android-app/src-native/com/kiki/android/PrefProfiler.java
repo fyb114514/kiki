@@ -56,10 +56,19 @@ public class PrefProfiler {
         }
 
         // --- 2. 提问习惯 ---
-        if (t.contains("为什么") || t.contains("为何") || t.contains("为啥")) {
+        //
+        // 【为什么要有"短应答"这一档】
+        // 原来"好的"这种应答词会被算成"爱提问" —— 因为它含"吗"?不,
+        // 是因为短句在真实对话里出现极多,一条 catch-all 分支就把
+        // "爱问为什么"淹没了(自检里"好的"观察 9 次,而"为什么"只 3 次,
+        // 结果画像显示"爱提问",与实际不符)。
+        // 所以先把纯应答词单独归一类,不污染提问习惯。
+        if (isShortAck(t)) {
+            store.countProfile(ASPECT_HABIT, "简短应答");
+        } else if (t.contains("为什么") || t.contains("为何") || t.contains("为啥")) {
             store.countProfile(ASPECT_HABIT, "爱问为什么");
         } else if (t.endsWith("?") || t.endsWith("？") || t.contains("吗")
-                || t.contains("什么") || t.contains("谁")) {
+                || t.contains("什么") || t.contains("谁") || t.contains("怎么")) {
             store.countProfile(ASPECT_HABIT, "爱提问");
         } else if (t.contains("不对") || t.contains("错了") || t.contains("不是")) {
             store.countProfile(ASPECT_HABIT, "爱纠正");
@@ -98,6 +107,25 @@ public class PrefProfiler {
             }
         }
         return reply;
+    }
+
+    /**
+     * 是不是"简短应答"（好的 / 嗯 / 是的 / 没错 …）。
+     *
+     * 这类话在真实对话里出现频率极高。若让它们进入"提问习惯"统计，
+     * 就会把"爱问为什么"淹没 —— 自检里实测出现过画像显示"爱提问"、
+     * 而用户其实一直在追问原因的情况。
+     */
+    static boolean isShortAck(String t) {
+        if (t == null) return false;
+        String s = t.trim();
+        if (s.isEmpty() || s.length() > 5) return false;
+        String[] acks = {"好的", "好", "嗯", "是的", "对", "没错", "行", "可以",
+                         "知道了", "明白", "谢谢", "再见", "在吗", "在么", "哦", "噢"};
+        for (String a : acks) {
+            if (s.equals(a)) return true;
+        }
+        return false;
     }
 
     /** 她的开场白是否该提一句"我记得你" */

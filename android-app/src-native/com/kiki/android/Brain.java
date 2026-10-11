@@ -109,10 +109,33 @@ public class Brain {
         return relations.size();
     }
 
+    /** 保存下来,供"清除数据"后重新加载内置知识 */
+    private final AssetManager assetsRef;
+
     public Brain(AssetManager assets) {
+        this.assetsRef = assets;
         loadFacts(assets);
         loadPinyin(assets);
         loadRelations(assets);
+    }
+
+    /**
+     * 重置为**只有内置知识**的状态。
+     *
+     * 为什么用"全部清空 + 重新加载",而不是"挑出用户教的那几条删掉":
+     * 事实图里内置事实和用户事实混在同一个列表与两个索引里,
+     * 没有来源标记,逐条辨认既慢又容易漏。
+     * 直接重建最可靠 —— 内置知识本来就在 assets 里,随时能读回来。
+     *
+     * 注意:**拼音表与关系表保留**(它们是语言基础,不是用户数据),
+     * 所以这两个不清、也不重载。
+     */
+    public void resetToBuiltin() {
+        if (assetsRef == null) return;
+        facts.clear();
+        bySubject.clear();
+        byObject.clear();
+        loadFacts(assetsRef);
     }
 
     private void loadFacts(AssetManager assets) {
@@ -1726,6 +1749,20 @@ public class Brain {
             if (match) bucket.remove(i);
         }
         if (bucket.isEmpty()) idx.remove(key);
+    }
+
+    /**
+     * 所有出现过的实体(主语与宾语)。
+     * 供同音词纠正建索引 —— 用户教过的生造词、人名、专有名词都在这里，
+     * 它们是"最值得纠正"的词。
+     */
+    public java.util.List<String> allEntities() {
+        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<String>();
+        for (Fact f : facts) {
+            if (f.s != null && f.s.length() >= 2) set.add(f.s);
+            if (f.o != null && f.o.length() >= 2 && f.o.length() <= 12) set.add(f.o);
+        }
+        return new java.util.ArrayList<String>(set);
     }
 
     public boolean hasEntity(String e) {

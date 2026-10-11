@@ -126,6 +126,11 @@ public class MainActivity extends Activity {
                 DialogSelfTest.run();               // 主动学习闭环(特性 1 的核心)
                 Feature2SelfTest.run(MainActivity.this);   // 特性 2 自检
                 SummarizerSelfTest.run(MainActivity.this);   // 语言总结自检
+                Dialog100Test.run(MainActivity.this);   // 100 轮对话测试
+                MemoryTest.run(MainActivity.this);   // 记忆持久化专项测试
+                HomophoneSelfTest.run(bot);   // 同音词纠正自检(复用已有 bot,避免 OOM)
+                ClearCommandSelfTest.run(MainActivity.this);   // 清除数据指令自检
+                ReproTest.run(MainActivity.this);   // 截图场景复现
             }
         }, "kiki-engine-t").start();
         // 临时 UI 测试模式(--ez uitest true 启动时进入)
@@ -451,6 +456,20 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         thinking = false;
+                        // 【清理指令的收尾】KikiBrain 清的是库与事实图,
+                        // 但主线程这边还缓存着偏好画像、同音索引和
+                        // SharedPreferences 里"半截对话"的存档,都要一起清,
+                        // 否则重启后旧的偏好与中间态又回来了。
+                        if (answer.kind != null && answer.kind.equals("cmd-clear")) {
+                            try {
+                                getSharedPreferences("kiki", MODE_PRIVATE).edit().clear().commit();
+                            } catch (Throwable ignored) {}
+                            if (store != null) {
+                                prefProfiler = new PrefProfiler(store);
+                            }
+                            if (brain != null) brain.reloadFacts();
+                            setHint("");
+                        }
                         // 特性 2:按"她眼里的你"调整措辞
                         // 必须是 final —— 下面的匿名 Callback 会捕获它
                         String adapted = answer.text;
@@ -471,7 +490,13 @@ public class MainActivity extends Activity {
                                             public void run() {
                                                 if (r.ok && r.factCount > 0 && r.summary != null) {
                                                     // 学到了:直接用网络学到的内容回答
+                                                    // 【只念前两句】截图实测:查"康氏是谁"时
+                                                    // 把整段维基正文(几百字)当回答吐出来了,
+                                                    // 屏幕刷满、语音念半天。这里截断到 60 字。
                                                     String learned = r.summary;
+                                                    if (learned.length() > 60) {
+                                                        learned = learned.substring(0, 60) + "…";
+                                                    }
                                                     // 联网事实是 NetworkLearner 直接写库的,
                                                     // 内存事实图不知道 —— 补一次,否则
                                                     // "刚学完再问还是答不出"。

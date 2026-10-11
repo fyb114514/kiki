@@ -124,7 +124,11 @@ public class DialogSelfTest {
         boolean ok = true;
 
         // 第 1 轮:遇到不懂的 -> 反问
-        KikiDialog.Reply r1 = d.askWho("比尔盖茨", "很出名");
+        // 【为什么传 true】模拟用户问的是"为什么比尔盖茨很出名" ——
+        // 只有**因果问句**才需要在学到身份后追问原因。
+        // "X 是什么/是谁"问到身份就够了,再追问一句会显得啰嗦
+        // (100 轮测试里同一句式出现 46 次,用户反馈"只会问…出名吗")。
+        KikiDialog.Reply r1 = d.askWho("比尔盖茨", "很出名", true);
         ok &= check("1.反问", r1.text, "是谁");
         ok &= checkState("1.状态", d.state(), KikiDialog.State.ASKING_WHO);
 
@@ -132,7 +136,11 @@ public class DialogSelfTest {
         KikiDialog.Reply r2 = d.handle("微软公司CEO");
         ok &= check("2.追问", r2.text, "微软公司");
         ok &= checkState("2.状态", d.state(), KikiDialog.State.ASKING_CAUSE);
-        ok &= checkFact("2.记住身份", sink.facts, "比尔盖茨", "是", "微软公司CEO");
+        // 【键已统一】身份存的是**抽取后的实体**("微软公司"),不是完整身份
+        // ("微软公司CEO")。因为事实图与查询方都用抽取后的实体,两边键必须一致 ——
+        // 原来存完整身份,查询对不上,表现就是"刚教完又问"(100 轮测试反复出现)。
+        // 追问句仍然用完整身份问("微软公司CEO 出名吗?"),读起来自然。
+        ok &= checkFact("2.记住身份(抽取后的实体)", sink.facts, "比尔盖茨", "是", "微软公司");
 
         // 第 3 轮:用户确认 -> 写因果 -> 回到空闲
         KikiDialog.Reply r3 = d.handle("没错");
@@ -161,7 +169,7 @@ public class DialogSelfTest {
         MemSink sink = new MemSink();
         KikiDialog d = new KikiDialog(sink);
 
-        d.askWho("张三", "很出名");
+        d.askWho("张三", "很出名", true);
         d.handle("某公司老板");
         KikiDialog.Reply r = d.handle("不是");
 
@@ -228,7 +236,7 @@ public class DialogSelfTest {
     private static boolean runTimeout() {
         MemSink sink = new MemSink();
         KikiDialog d = new KikiDialog(sink);
-        d.askWho("李四", "很出名");
+        d.askWho("李四", "很出名", true);
         // 手动把时间戳改老,模拟超时
         String ser = d.serialize();
         String[] p = ser.split("\t", -1);

@@ -228,6 +228,23 @@ public class KikiBot {
         return segment(text);
     }
 
+    /**
+     * 拼音(无声调连写);查不到返回 null。
+     * 供 {@link HomophoneCorrector} 做同音词纠正/消歧。
+     */
+    public String pinyinOf(String w) {
+        return brain.pinyinKey(w);
+    }
+
+    /**
+     * 事实图里出现过的全部实体名。
+     * 同音词纠正要拿它建索引 —— 用户教过的生造词、人名、专有名词都在里面，
+     * 这些正是最需要纠正的词。
+     */
+    public java.util.Set<String> allEntityNames() {
+        return brain.entityNames();
+    }
+
     public List<String> contentTokens(String text) {
         List<String> out = new ArrayList<String>();
         for (String t : segment(text)) {

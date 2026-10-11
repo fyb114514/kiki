@@ -72,7 +72,18 @@ public class Store {
     private final SQLiteDatabase db;
 
     public Store(Context context) {
-        db = context.openOrCreateDatabase(DB_NAME, Context.MODE_PRIVATE, null);
+        this(context, DB_NAME);
+    }
+
+    /**
+     * 用指定的库名打开 —— 供自检/自动化测试使用。
+     *
+     * 为什么需要它：100 轮自动对话会把大量测试事实写进库。
+     * 如果用正式库(kiki.db)，测试数据会污染用户真实的知识，
+     * 而且测试之间也会互相干扰。所以测试用独立的库文件。
+     */
+    public Store(Context context, String dbName) {
+        db = context.openOrCreateDatabase(dbName, Context.MODE_PRIVATE, null);
         db.execSQL("CREATE TABLE IF NOT EXISTS learned ("
                 + "keyword TEXT PRIMARY KEY,"
                 + "answer TEXT NOT NULL,"
@@ -322,6 +333,32 @@ public class Store {
             db.delete("fact", "s=? AND rel=? AND o=?", new String[]{s, rel, o});
         } catch (Exception ignored) {
         }
+    }
+
+    /**
+     * 清空**全部用户数据**。
+     *
+     * 删掉的是用户自己产生的数据:
+     *     fact     自学事实(用户教的)
+     *     learned  用户教的问答对
+     *     topic    话题偏好统计
+     *     pref     说话风格等偏好
+     * 内置知识不在库里(在 assets 里),所以不受影响。
+     *
+     * 用 DELETE 而不是 DROP TABLE:表结构还要继续用,删表会让后续插入报错。
+     */
+    public void clearUserData() {
+        for (String t : new String[]{"fact", "learned", "topic", "pref"}) {
+            try {
+                db.delete(t, null, null);
+            } catch (Exception ignored) {
+            }
+        }
+        try {
+            db.execSQL("VACUUM");       // 回收空间,顺便把删掉的数据真正清出文件
+        } catch (Exception ignored) {
+        }
+        android.util.Log.i(TAG, "已清空全部用户数据(fact/learned/topic/pref)");
     }
 
     /** 删除某个主语的全部事实(自检清理用;也可用于"忘掉"功能) */

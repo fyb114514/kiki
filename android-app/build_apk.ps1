@@ -1,4 +1,4 @@
-﻿﻿# 手工构建 APK:完全离线,不需要 Gradle / AGP / 任何依赖下载。
+﻿# 手工构建 APK:完全离线,不需要 Gradle / AGP / 任何依赖下载。
 #
 # 为什么走手工构建
 # ----------------
@@ -140,8 +140,30 @@ if ($classFiles.Count -eq 0) { throw "没有生成 .class" }
 # 否则它们的类不会进 dex —— 运行时就是 NoClassDefFoundError: Lorg/vosk/Model;
 # 一开始我就是这么错的。--lib 仍然只给平台类。
 # 不含 libjnidispatch.so 的 .jar 里没有原生库,d8 只处理 .class,安全。
-& "$buildTools\d8.bat" --lib $androidJar --min-api 24 --output $dexDir $classFiles $sherpaJar $kotlinJar
-if ($LASTEXITCODE -ne 0) { throw "d8 失败" }
+# 把 classes 打成 jar,让 d8 只看到一个短路径。
+# 原写法是把 $classFiles(每个 .class 的绝对路径)直接拼到命令行,
+# 而 Windows 命令行上限 8191 字符 -> "The input line is too long."
+# 而且这是累积触发的:每加一个源文件就更长一点,直到某天突然失败。
+$classJar = "$out\classes.jar"
+if (Test-Path $classJar) { Remove-Item $classJar -Force }
+$env:JAVA_HOME = $jdk
+# 不用 jar 的 -C 参数:它会让 jar 去 java.io.tmpdir 建临时文件,
+# 而本机为构建设的 TMP 指向受限目录 -> AccessDeniedException。
+# 改成切到 classes 目录打相对路径,完全不碰临时目录。
+Push-Location $classesDir
+try {
+    & "$jdk\bin\jar.exe" cf $classJar . 2>&1 | Out-Null
+} finally {
+    Pop-Location
+}
+if (-not (Test-Path $classJar)) { throw "打包 classes.jar 失败" }
+Write-Host "    classes.jar 已生成 ($([math]::Round((Get-Item $classJar).Length/1KB,0)) KB)"
+
+& "$buildTools\d8.bat" --lib $androidJar --min-api 24 --output $dexDir $classJar $sherpaJar $kotlinJar
+if ($LASTEXITCODE -ne 0) {
+    # 必须中止:原来失败了也继续,最后还打印"构建成功",把失败掩盖了。
+    throw "d8 生成 dex 失败(看上面的错误)"
+}
 Check "$dexDir\classes.dex" 'classes.dex'
 Write-Host "    classes.dex 生成完成"
 

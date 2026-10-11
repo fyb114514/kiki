@@ -60,6 +60,9 @@ public class KikiDialog {
      */
     private String learnedIdentity = null;
 
+    /** 本次反问是不是由"为什么…"触发的 —— 只有因果问句才需要追问原因 */
+    private boolean isWhyQuestion = false;
+
     private long stateAt = 0L;
 
     /** 本轮对话里积累的临时事实(还没落盘) */
@@ -107,6 +110,14 @@ public class KikiDialog {
         if (state != State.IDLE && System.currentTimeMillis() - stateAt > PENDING_TTL_MS) {
             reset();
         }
+    }
+
+    /**
+     * 公开的复位 —— 供"清除数据"指令把状态机从"等你回答"拉回空闲。
+     * 内部逻辑与 reset() 相同,只是可见性放开。
+     */
+    public void resetState() {
+        reset();
     }
 
     private void reset() {
@@ -181,28 +192,65 @@ public class KikiDialog {
         // 正确做法:先看答案里有没有"…是…"结构,有就取"是"后面的部分。
         String identity = extractPredicate(answer);
 
-        // 2. 记住身份。用"是"作为关系(最常见的表述)
-        sink.remember(subject, "是", identity);
-        learned.add(new String[]{subject, "是", identity});
-        learnedIdentity = identity;
-
-        // 3. 从身份里抽出关键实体(用于追问因果)
+        // 2. 从身份里抽出**关键实体**。
+        //    这个实体既是事实图的存储键,也是追问时问的那个东西。
         String keyEntity = extractEntity(identity);
+        if (keyEntity == null || keyEntity.length() < 2) keyEntity = identity;
 
-        // 3. 追问因果:这个实体是不是让 X 出名的原因?
-        state = State.ASKING_CAUSE;
-        pendingRelation = relation;   // 保留原问题想查的关系
-        if (keyEntity != null && !keyEntity.isEmpty()) {
-            learnedWho = keyEntity;
-            // 【修 Bug】这里原来硬编码成 "是…让…出名的吗？" ——
-            // 于是无论你问什么(为什么天是蓝的 / 为什么水会沸腾),
-            // 追问句永远是"…出名的吗？",用户反馈"为什么只有出名这个问题"。
-            // 现在改用**用户真实问的那个关系**,并把程度副词(很/非常…)去掉,
-            // 否则"让比尔盖茨很出名吗"读起来别扭。
-            String base = baseRelation(relation);
-            return new Reply("是" + keyEntity + "让" + subject + base + "吗？", true, true);
+        // 【身份太短就拒绝】
+        // 截图实测:反问后用户只答了一个"微",被当成"微软公司的身份"存了下来,
+        // 于是之后所有回答都乱。这里直接判定"没听清",不写任何东西。
+        if (keyEntity == null || keyEntity.length() < 2) {
+            reset();
+            return new Reply("这个我没听清，你再说一遍好不好？", true, false);
         }
-        // 抽不出实体就只记身份,不再追问
+
+        // 3. 记住身份 —— 【关键】存**抽取后的实体**,不是整句身份。
+        //
+        // 原来存的是完整身份(如"微软公司CEO"),而事实图在 addFact 时
+        // 会做规范化,查询方(是什么/为什么)用的是抽取后的实体,
+        // 两边键不一致 -> "刚教完又问",100 轮测试里反复出现。
+        // 现在统一成抽取后的实体:
+        //     比尔盖茨 | 是 | 微软公司        <- 事实图与查询都用这个键
+        // 而**追问句**仍然用完整身份("微软公司CEO 出名吗？"),读起来自然。
+        sink.remember(subject, "是", keyEntity);
+        learned.add(new String[]{subject, "是", keyEntity});
+        learnedIdentity = keyEntity;
+
+        // 4. 追问。
+        //
+        // 【为什么改成问"Y 具备那个属性吗"】
+        // 原实现问的是"是 Y 让 X 很出名吗？" —— 那是把用户的问题
+        // **原样丢回去**,确认不了任何新东西。
+        //
+        // 而要回答"为什么 X 出名",真正需要的是:确认 **Y 自己出不出名**。
+        // 如果 Y(微软公司)出名,而 X 是 Y 的 CEO,就能推出 X 出名。
+        //
+        //   用户：为什么比尔盖茨很出名
+        //   她　：我不知道，比尔盖茨是谁？
+        //   用户：微软公司CEO
+        //   她　：微软公司出名吗？          <- 问因方是否具备那个属性
+        //   用户：是的
+        //   她　：明白了
+        //   用户：比尔盖茨很出名
+        //   她　：因为他是微软公司CEO       <- 推出来了
+        //
+        // 另外:只有当用户问的是**因果类**(为什么…)时才追问;
+        // "X 是什么/是谁"没有"原因"可追,问身份就够了,不必再问一句。
+        if (keyEntity != null && !keyEntity.isEmpty() && isWhyQuestion) {
+            learnedWho = keyEntity;
+            String attr = baseRelation(relation);
+            state = State.ASKING_CAUSE;
+            pendingRelation = relation;
+            // 几句轮换,避免每次都一模一样(100 轮测试里同一句式出现 46 次)
+            String[] tpl = {
+                    keyEntity + attr + "吗？",
+                    keyEntity + "算" + attr + "吗？",
+                    keyEntity + "是不是" + attr + "？",
+            };
+            return new Reply(tpl[(int) (Math.abs(keyEntity.hashCode()) % tpl.length)], true, true);
+        }
+        // 没有原因可追 -> 只记身份,收工
         reset();
         return new Reply("明白了", true, true);
     }
@@ -293,6 +341,14 @@ public class KikiDialog {
      * @param relation 用户想问的关系(为什么…很出名 -> "很出名"),可为空
      */
     public Reply askWho(String subject, String relation) {
+        return askWho(subject, relation, false);
+    }
+
+    /**
+     * @param why true 表示这次反问来自"为什么…" —— 学到身份后还要追问原因
+     */
+    public Reply askWho(String subject, String relation, boolean why) {
+        this.isWhyQuestion = why;
         this.state = State.ASKING_WHO;
         this.pendingSubject = subject;
         this.pendingRelation = relation;

@@ -45,6 +45,8 @@ public class KikiBrain {
     private final KikiBot bot;         // 检索层:内置问答 + 事实库
     /** 语言总结(原版视频演示的能力之一) */
     private Summarizer summarizer;
+    /** 同音词纠正 + 记忆库消歧 */
+    private HomophoneCorrector homophone;
     private final Brain fact;         // 事实层:因果/属性/分类继承
     private final KikiDialog dialog;  // 对话状态机:多轮主动学习
     private Store store;              // 本地记忆:用户教过的东西
@@ -92,6 +94,16 @@ public class KikiBrain {
         // 语言总结需要"词表校验 + 事实图查询",和事实检索共用一套。
         // 用一个匿名 Sink 委托回 KikiBrain 自己 —— 不要把 dialog 的 sink 借出来,
         // 那个对象只属于 dialog。
+        // 同音词纠正器:需要拼音表(pinyin.txt)+ 事实图里的实体
+        if (homophone == null && bot != null && fact != null) {
+            homophone = new HomophoneCorrector(fact);
+            try {
+                homophone.indexAll();
+                android.util.Log.i("kiki-hr", "同音词索引建立完成: " + homophone.size() + " 组");
+            } catch (Throwable t) {
+                android.util.Log.w("kiki-hr", "建索引失败: " + t);
+            }
+        }
         if (summarizer == null && bot != null) {
             summarizer = new Summarizer(new Summarizer.Lexicon() {
                 @Override public boolean isWord(String w) { return bot.isWord(w); }
@@ -162,16 +174,56 @@ public class KikiBrain {
      *   4. 事实库检索 + 因果推导
      *   5. 都没命中 -> 主动反问(特性 1 的核心)
      */
+    /** 管理指令前缀:说 "system清除数据" 就清空全部用户数据 */
+    public static final String CMD_CLEAR = "system清除数据";
+
     public Answer reply(String input) {
         String raw = input == null ? "" : KikiBot.trim(input);
+
+        // ---------- 0. 管理指令(最高优先级) ----------
+        // 必须在**同音纠正之前**判断:否则"清除数据"可能被纠正成别的词。
+        // 也必须在状态机之前:否则她停在"等你回答"时,这句会被当成答案。
+        if (isClearCommand(raw)) {
+            String msg = clearAllUserData();
+            return new Answer(msg, "管理指令:清除数据", "cmd-clear");
+        }
+
+        // 【同音词纠正】识别结果如果不在已知实体里,用拼音比对纠正。
+        // 用户教过的生造词/人名/专有名词靠这一步会越用越准。
+        if (homophone != null && !raw.isEmpty()) {
+            try {
+                String fixed = homophone.correct(raw);
+                if (fixed != null && !fixed.equals(raw)) {
+                    homophone.noteContext(raw);
+                    raw = fixed;
+                } else {
+                    homophone.noteContext(raw);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
         if (raw.isEmpty()) {
             return new Answer("嗯？", "空输入", "miss");
         }
 
-        // ---------- 1. 对话状态机优先 ----------
+        // ---------- 0. 问句意图 ----------
+        // 【100 轮测试暴露的问题】"三角函数怎么做" 被她当成"用户在教知识",
+        // 回"明白了"并把垃圾写进库,之后互相污染、回答越来越荒谬。
+        // 所以先判断意图:是**问句**就不该被当答案消费。
+        Intent intent = intentOf(raw);
+        boolean isQuestion = (intent != Intent.OTHER);
+
+        // ---------- 1. 对话状态机 ----------
         // 注意:这里**不做**"看起来像问句就跳过"的判断 ——
         // 因为追问阶段的回答可能是"没错",而反问阶段的回答可能是长句。
         // 原版行为是:你正在被问,你说的话就是答案。
+        //
+        // 【例外】明确的"怎么做/如何"问句要在状态机之前拦下来:
+        // 它不是对反问的回答,而是一个新问题。
+        if (intent == Intent.HOW) {
+            return answerHow(raw);
+        }
+
         KikiDialog.Reply dr = dialog.handle(raw);
         if (dr.consumed) {
             if (dr.learned) persistLearned();
@@ -238,8 +290,170 @@ public class KikiBrain {
             return new Answer(q, "已知实体但关系未知", "ask");
         }
 
-        KikiDialog.Reply r = dialog.askWho(subject, relation);
+        // 只有"为什么…"这类因果问句才需要在学到身份后继续追问原因。
+        // "X 是什么/是谁"问到身份就够了,再追问一句会显得啰嗦
+        // (100 轮测试里同一句式出现 46 次,用户反馈"只会问…出名吗")。
+        boolean why = (intentOf(raw) == Intent.WHY);
+        KikiDialog.Reply r = dialog.askWho(subject, relation, why);
         return new Answer(r.text, "未知(主动提问)", "ask");
+    }
+
+    /**
+     * 回答"怎么做 / 如何"这类问题。
+     *
+     * 【诚实优先】她不知道做法时**不该编**,也不该把问句当知识记下来。
+     * 原版性格是"不知道就问",这里沿用:
+     *   - 库里如果有该主语的"做法"事实,就照答
+     *   - 否则老实说不会,并请用户教 —— 但不进入"反复追问"的闭环
+     *     (因为做法属于开放性问题,追问因果没有意义)
+     */
+    private Answer answerHow(String raw) {
+        String subj = extractSubject(raw);
+        if (subj != null && fact != null) {
+            List<String> how = fact.forward(subj, "做法");
+            if (!how.isEmpty()) {
+                return new Answer(subj + "的做法是" + join(how, "、"), "做法检索", "how");
+            }
+        }
+        if (subj != null && !subj.isEmpty()) {
+            return new Answer("这个我还没学会，" + subj + "要怎么做呀？",
+                    "不会做法,请求指教", "ask-how");
+        }
+        return new Answer("这个我还没学会，你教教我好不好？", "不会做法,请求指教", "ask-how");
+    }
+
+    /**
+     * 是不是"清除数据"指令。
+     *
+     * 宽松匹配:允许用户说 "system 清除数据" / "system清除数据" /
+     * "SYSTEM清除数据" / 带标点 —— 语音识别常把空格和大小写弄乱。
+     */
+    static boolean isClearCommand(String raw) {
+        if (raw == null) return false;
+        String t = raw.replace(" ", "").replace("　", "")
+                      .replace("，", "").replace(",", "")
+                      .replace("。", "").replace(".", "")
+                      .replace("！", "").replace("!", "").trim();
+        return t.equalsIgnoreCase(CMD_CLEAR);
+    }
+
+    /**
+     * 执行清除:本地库 + 内存事实图 + 对话状态 + 上下文。
+     *
+     * 【不删内置知识】内置的 1795 条事实在 assets 里,不属于"用户数据"。
+     * 内存事实图用 resetToBuiltin() 重建,只恢复内置部分。
+     */
+    public String clearAllUserData() {
+        int before = 0;
+        try {
+            if (store != null) {
+                before = store.loadFacts().size();
+                store.clearUserData();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "清库失败: " + t);
+        }
+        try {
+            if (fact != null) fact.resetToBuiltin();
+        } catch (Throwable t) {
+            Log.w(TAG, "重置事实图失败: " + t);
+        }
+        // 对话状态可能停在"等你回答",必须复位,否则下一句会被当答案
+        try { if (dialog != null) dialog.resetState(); } catch (Throwable ignored) {}
+        // 同音索引重建(里面含刚被删掉的用户词)
+        try {
+            if (homophone != null) {
+                homophone = new HomophoneCorrector(fact);
+                homophone.indexAll();
+            }
+        } catch (Throwable ignored) {}
+        Log.i("kiki-clear", "清除用户数据完成,原有自学事实 " + before + " 条");
+        return "好的，我把之前学的都忘掉了。现在只记得出厂的知识。";
+    }
+
+    /** 状态机当前状态名(自检/日志用) */
+    public String stateName() {
+        try {
+            return dialog == null ? "?" : dialog.state().name();
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    /** 问句意图 */
+    public enum Intent {
+        WHAT,   // X 是什么 / 是谁
+        WHY,    // 为什么 X …
+        HOW,    // 怎么 X / X 怎么做 / 如何 X
+        WHERE,  // X 在哪
+        OTHER   // 其它(陈述句/闲聊)
+    }
+
+    /**
+     * 判断问句意图。
+     *
+     * 【为什么需要它】100 轮自动对话测试暴露:
+     *   "三角函数怎么做" 被当成了"用户在教知识" —— 她回"明白了",
+     *   还把垃圾写进事实库;之后用这些垃圾推理,回答越来越荒谬。
+     * 根因就是**从来没有区分过问句类型**,反问状态机无条件把任何输入当答案。
+     */
+    public static Intent intentOf(String raw) {
+        String s = stripPunct(KikiBot.trim(raw == null ? "" : raw));
+        if (s.isEmpty()) return Intent.OTHER;
+        for (String p : new String[]{"为什么", "为何", "为啥"}) {
+            if (s.startsWith(p)) return Intent.WHY;
+        }
+        if (s.contains("为什么") || s.contains("为何")) return Intent.WHY;
+        // 怎么做 / 如何 / 怎么办
+        if (s.startsWith("怎么") || s.startsWith("如何") || s.contains("怎么做")
+                || s.contains("怎么办") || s.contains("怎么才能") || s.contains("如何做")) {
+            return Intent.HOW;
+        }
+        if (s.endsWith("是什么") || s.endsWith("是谁") || s.endsWith("是啥")
+                || s.endsWith("是什么东西") || s.contains("是什么")) {
+            return Intent.WHAT;
+        }
+        if (s.endsWith("在哪里") || s.endsWith("在哪") || s.endsWith("在哪儿")) {
+            return Intent.WHERE;
+        }
+        return Intent.OTHER;
+    }
+
+    /**
+     * 主语质量闸:抽出来的主语**像不像一个实体**。
+     *
+     * 100 轮测试里出现了这些垃圾主语(整句当实体):
+     *   "为什么红楼梦很出名"  "微波炉有什么特点"  "康神为什么存在"
+     * 它们被当事实存下来后互相污染,回答就变得荒谬。
+     * 所以落盘前必须过闸:过长、含疑问词、含标点的都拒收。
+     */
+    static boolean looksLikeEntity(String w) {
+        if (w == null) return false;
+        String s = w.trim();
+        if (s.isEmpty() || s.length() > 10) return false;
+
+        // 【单字不成实体】
+        // 截图实测:"为什么微软公司很出名" 反问后用户答了一个"微",
+        // 就被存成 "微软公司 | 是 | 微",之后回答全乱
+        // (截图里出现过"康氏是谁是微软公司的一种")。
+        // 汉语里单个字几乎不构成实体,而那些单字虚词/量词正是我们不想学的。
+        // 所以直接拒收单字。
+        if (s.length() < 2) return false;
+
+        // 含疑问词 -> 不是实体
+        for (String q : new String[]{"为什么", "为何", "怎么", "如何", "什么", "谁",
+                                     "哪里", "哪儿", "哪", "吗", "呢", "多少", "几"}) {
+            if (s.contains(q)) return false;
+        }
+        // 含标点/空格 -> 不是实体
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '，' || c == ',' || c == '。' || c == '、' || c == '？' || c == '?'
+                    || c == '！' || c == '!' || c == ' ' || c == '的' && s.length() > 6) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -267,7 +481,24 @@ public class KikiBrain {
 
         // "X是谁/是什么/怎么样/在哪…" -> 去掉疑问尾巴
         String sub = bot.stripQuestionTail(s);
-        return sub.isEmpty() ? s : sub;
+        if (!sub.isEmpty() && looksLikeEntity(sub)) return sub;
+
+        // 【兜底】还是抽不出,就把疑问尾巴全部剥掉再试。
+        // 100 轮测试里 "微波炉有什么特点" 曾整句被当主语,就是少了这一步。
+        String fallback = s;
+        for (String tail : new String[]{"有什么特点", "是什么东西", "为什么存在",
+                                        "怎么办", "怎么做", "怎么用", "如何",
+                                        "怎么样", "是什么", "是谁", "在哪里", "在哪"}) {
+            int k = fallback.indexOf(tail);
+            if (k > 0) fallback = fallback.substring(0, k);
+        }
+        fallback = stripPunct(fallback).trim();
+        if (!fallback.isEmpty() && looksLikeEntity(fallback)) return fallback;
+
+        // 实在抽不出像样的实体 -> 返回 null,走通用反问。
+        // 不再硬编一个主语(硬编出来的是"为什么红楼梦很出名"这种整句,
+        // 存进库会互相污染,回答就越来越荒谬)。
+        return null;
     }
 
     /**
@@ -298,16 +529,115 @@ public class KikiBrain {
     };
 
     /** 把"比尔盖茨很出名"切成"比尔盖茨"(在"很/是/会/能"等词前切) */
-    private static String cutAtPredicate(String s) {
-        String[] marks = {"很", "非常", "特别", "挺", "是", "会", "能", "可以",
-                          "要", "在", "有", "被", "让", "叫", "做"};
+    /**
+     * 从"X<关系>"里切出实体 X。
+     *
+     * 【为什么不再用规则法】我在这上面打了四五次补丁,每次都顾此失彼:
+     *   标记表里有"要"  -> "康神重要" 被切成 "康神重"(从"重要"中间切了)
+     *   给"要"设边界    -> "微软公司" 里的"是"也失效了
+     *   长标记优先       -> "量子力学重要" 切成了 "量子力"
+     * 原因是:哪个字是实体的结尾,取决于**哪些字构成一个词**,
+     * 这不是几个 if 能判出来的。
+     *
+     * 【现在的做法】用现成的 **4 万词表**(KikiBot.words)词表驱动:
+     *   试所有切点,选**最长的、且这个词在词表里存在**的前缀。
+     *   量子力学重要 -> "量子力学"在词表里 -> 取它 ✔
+     *   微软公司     -> 整个在词表里        -> 取它 ✔
+     *   红楼梦很出名  -> "红楼梦"在词表里    -> 取它 ✔
+     * 词表里找不到任何前缀时才退回到旧的规则法。
+     */
+    String cutAtPredicate(String s) {
+        if (s == null || s.isEmpty()) return s;
+
+        // ---------- 用分词器的词边界 ----------
+        // 这是本轮最重要的改动。之前我用"从长到短试前缀"的土办法,
+        // 于是"量子力学"被更短的"量子"抢先(词表里两者都有),
+        // "测试甲""康神"这种生造词更是完全抽不出来 ——
+        // 而实体抽错 = 用错的键去记,表现就是用户说的"记不住"。
+        java.util.List<String> words = null;
+        if (bot != null) {
+            try { words = bot.segmentPublic(s); } catch (Throwable ignored) {}
+        }
+        if (words == null || words.isEmpty()) return cutAtPredicateByRules(s);
+
+        StringBuilder sb = new StringBuilder();
+        for (String w : words) {
+            if (w == null || w.isEmpty()) continue;
+            boolean isPred = PREDICATES.contains(w);
+            // 第一个内容词
+            if (sb.length() == 0) {
+                if (isPred || isQuestionWord(w)) continue;   // 跳过疑问词
+                sb.append(w);
+                continue;
+            }
+            // 后续:谓词就停;虚词跳过;**单字且非谓词就粘上**(处理生造词)
+            if (isPred || isQuestionWord(w)) break;
+            if (w.length() == 1 && !isParticle(w.charAt(0))) {
+                sb.append(w);        // 未知词粘连:"测试" + "甲" = "测试甲"
+            } else if (w.length() >= 2 && sb.length() <= 6) {
+                sb.append(w);        // "量子" + "力学"(分词没合起来时兜底)
+            } else {
+                break;
+            }
+            if (sb.length() > 8) break;
+        }
+        String cut = sb.toString();
+        if (cut.length() >= 2) return cut;
+
+        return cutAtPredicateByRules(s);
+    }
+
+    /** 谓词/程度词:遇到就认为实体已结束 */
+    private static final java.util.HashSet<String> PREDICATES =
+            new java.util.HashSet<String>(java.util.Arrays.asList(
+                    "很", "非常", "特别", "挺", "是", "会", "能", "可以", "要", "重要",
+                    "在", "有", "被", "让", "叫", "做", "怎么样", "出名", "存在",
+                    "为什么", "怎么", "如何", "什么", "谁", "哪里", "哪"));
+
+    private static boolean isPredicateWord(String w) {
+        return PREDICATES.contains(w);
+    }
+
+    private static boolean isQuestionWord(String w) {
+        return w.startsWith("为什么") || "怎么".equals(w) || "如何".equals(w)
+                || "什么".equals(w) || "谁".equals(w) || "哪里".equals(w);
+    }
+
+    /** 虚词单字(助词/语气词)不该粘到实体上 */
+    private static boolean isParticle(char c) {
+        String p = "的了着过吗呢吧啊呀哦嗯和跟与及或在地得之其";
+        return p.indexOf(c) >= 0;
+    }
+
+    /**
+     * 规则法兜底:在常见的谓词/副词标记处切。
+     * 只用于词表里查不到的情况,所以不必追求完美。
+     */
+    private static String cutAtPredicateByRules(String s) {
+        // 长的优先,避免"重要"被"要"从中间切开
+        String[] marks = {"非常重要", "是不是", "特别", "非常", "可以", "重要",
+                          "很", "挺", "是", "会", "能", "要", "在", "有",
+                          "被", "让", "叫", "做"};
         int cut = -1;
         for (String m : marks) {
             int i = s.indexOf(m);
+            if (len2(m)) {
+                // 多字标记:跳过"词中命中"(前面是汉字 -> 它可能属于更长的词)
+                while (i > 0 && isHan(s.charAt(i - 1))) i = s.indexOf(m, i + 1);
+            }
             if (i > 0 && (cut < 0 || i < cut)) cut = i;
         }
         return cut > 0 ? s.substring(0, cut).trim() : s;
     }
+
+    private static boolean len2(String m) {
+        return m != null && m.length() >= 2;
+    }
+
+    private static boolean isHan(char c) {
+        return c >= 0x4E00 && c <= 0x9FFF;
+    }
+
 
     /** 抽"为什么X<关系>"里的关系部分,如"很出名" */
     String extractWhyRelation(String raw) {
@@ -411,6 +741,17 @@ public class KikiBrain {
     void remember(String s, String rel, String o) {
         if (s == null || rel == null || o == null) return;
         if (s.isEmpty() || rel.isEmpty() || o.isEmpty()) return;
+
+        // 【质量闸】主语必须像个实体。
+        // 100 轮自动对话测试里出现了这些垃圾主语(整句当实体):
+        //   "为什么红楼梦很出名"  "微波炉有什么特点"  "康神为什么存在"
+        // 它们一旦入库就会互相污染,回答越来越荒谬
+        // (实测出现过 "三角函数是咖啡的一种")。这里直接拒收。
+        if (!isFactWorthSaving(s, rel, o)) {
+            Log.i(TAG, "拒收不像实体的事实: " + s + " | " + rel + " | " + o);
+            return;
+        }
+
         fact.addFact(s, rel, o, "taught");
         if (store != null) {
             try {
@@ -419,10 +760,43 @@ public class KikiBrain {
                 Log.e(TAG, "落盘失败: " + t);
             }
         }
+        // 新学的实体补进同音词索引,下次就不会再听错
+        if (homophone != null) {
+            try { homophone.index(s); homophone.index(o); } catch (Throwable ignored) {}
+        }
         Log.i(TAG, "学到: " + s + " | " + rel + " | " + o);
     }
 
     /** 把状态机这一轮学到的事实落盘 */
+    /**
+     * 落盘前过一遍主语质量闸。
+     * 100 轮测试里"为什么红楼梦很出名"这种整句被当主语存下来,
+     * 之后互相污染 -> 回答荒谬。这里直接拒收。
+     */
+    /**
+     * 落盘前的质量闸。
+     *
+     * 【主语严格、宾语宽松】这是踩过的坑:
+     * 我给 looksLikeEntity 加了"单字不成实体"之后,特性 2 自检从 12/12 掉到 11/12 ——
+     * 因为有些**正当事实的宾语就是单字**(例如"丙 | 喜欢 | 旧")。
+     * 所以:
+     *   主语  -> 必须像实体(长度 >= 2、不含疑问词、不含标点)
+     *   宾语  -> 只要不太长就行
+     * 这样"微软公司 | 是 | 微"这种(用户只答了一个字)被拒,
+     * 而正当的单字宾语不受影响。
+     */
+    private boolean isFactWorthSaving(String s, String rel, String o) {
+        if (!looksLikeEntity(s)) return false;
+        // 宾语也要 >= 2 字。
+        // 截图实测:反问后用户只答了一个"微",就被存成
+        //     "微软公司 | 是 | 微"
+        // 之后所有回答都乱("康氏是谁是微软公司的一种")。
+        // 单字宾语没有信息量,拒收。
+        if (o == null || o.length() < 2) return false;
+        if (o.length() > 30) return false;
+        return true;
+    }
+
     private void persistLearned() {
         // remember() 已经在写入时落盘了,这里只是语义钩子
     }
